@@ -3,16 +3,19 @@ import { listVisible } from "./db.ts";
 import { fileForCover } from "./photos.ts";
 import { toPublic } from "./present.ts";
 import { COPY } from "./schemas.ts";
+import { publicSitePage } from "./site.ts";
 
 export function mountPublic(app: Express): void {
   app.get("/api/blog", async (_req, res, next) => {
     try {
       const rows = (await listVisible()).filter((row) => row.slug && row.pillar);
       const featured = rows.find((row) => row.featured) ?? null;
+      const page = await publicSitePage("blog");
       res.setHeader("Cache-Control", "public, max-age=60");
       res.json({
         featured: featured ? toPublic(featured, true) : null,
         posts: rows.filter((row) => row !== featured).map((row) => toPublic(row, false)),
+        page,
       });
     } catch (error) {
       next(error);

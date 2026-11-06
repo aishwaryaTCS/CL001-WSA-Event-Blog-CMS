@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { EventRow, FilterRow, PhotoRow, RhythmRow, YearRow } from "./db.ts";
+import { autosaveScript } from "../autosave.ts";
 import {
   CAL_COPY,
   COLOR_KEYS,
@@ -284,6 +285,11 @@ export function dashboardBody(
       </div>
     </header>
     ${banner("", notice)}
+    <form class="filters-row" method="get" action="/admin/calendar/events" role="search">
+      <div class="field"><label for="d-q">Search events</label>
+        <input id="d-q" name="q" type="search" maxlength="80" autocomplete="off" placeholder="Title, grade, plan…" required></div>
+      <button class="secondary" type="submit">Search</button>
+    </form>
     <div class="dash">
       <section class="panel">
         <h2>Needs photos${countBadge(needs.length)}</h2>
@@ -323,11 +329,13 @@ export function eventsBody(
   events: ListedEvent[],
   allEvents: ListedEvent[],
   strands: FilterRow[],
-  filter: { strand: string; state: string },
+  filter: { strand: string; state: string; q?: string },
   notice: string,
 ): string {
   const keys = monthKeys(year.first_month, year.last_month);
   const byId = new Map(strands.map((row) => [row.id, row]));
+  const searching = Boolean(filter.q);
+  // Month links leave the search and open that month (keeping strand and state).
   const query = (key: string): string => {
     const params = new URLSearchParams({ month: key });
     if (filter.strand) params.set("strand", filter.strand);
@@ -340,7 +348,7 @@ export function eventsBody(
   const rail = keys
     .map((key) => {
       const n = allEvents.filter((item) => item.row.start_date.startsWith(key) && matches(item)).length;
-      return `<a href="/admin/calendar/events?${esc(query(key))}"${key === month ? ' aria-current="true"' : ""}><span>${monthShort(key)}</span>${n ? `<span class="n">${n}</span>` : ""}</a>`;
+      return `<a href="/admin/calendar/events?${esc(query(key))}"${key === month && !searching ? ' aria-current="true"' : ""}><span>${monthShort(key)}</span>${n ? `<span class="n">${n}</span>` : ""}</a>`;
     })
     .join("");
   const cards = events
@@ -375,6 +383,8 @@ export function eventsBody(
     ${banner("", notice)}
     <form class="filters-row" method="get" action="/admin/calendar/events">
       <input type="hidden" name="month" value="${esc(month)}">
+      <div class="field"><label for="f-q">Search the year</label>
+        <input id="f-q" name="q" type="search" maxlength="80" autocomplete="off" placeholder="Title, grade, plan…" value="${esc(filter.q ?? "")}"></div>
       <div class="field"><label for="f-strand">Strand</label>
         <select id="f-strand" name="strand"><option value="">All strands</option>${strands
           .map((row) => `<option value="${esc(row.id)}"${row.id === filter.strand ? " selected" : ""}>${esc(row.name)}${row.active ? "" : " (hidden)"}</option>`)
@@ -383,16 +393,21 @@ export function eventsBody(
         <select id="f-state" name="state">${stateOptions
           .map(([value, label]) => `<option value="${value}"${value === filter.state ? " selected" : ""}>${label}</option>`)
           .join("")}</select></div>
-      <button class="secondary" type="submit">Filter</button>
+      <button class="secondary" type="submit">${searching ? "Search" : "Filter"}</button>
+      ${searching || filter.strand || filter.state ? `<a class="button secondary" href="/admin/calendar/events?month=${esc(month)}">Clear</a>` : ""}
     </form>
     <div class="cal-layout">
       <nav class="month-rail" aria-label="Months">${rail}</nav>
       <section>
         <div class="month-head">
-          <div><h2>${esc(monthLong(month))}</h2><p>${esc(year.month_lines[month] ?? "")}</p></div>
+          ${
+            searching
+              ? `<div><h2>Search: “${esc(filter.q ?? "")}”</h2><p>Results from the whole school year, by date.</p></div>`
+              : `<div><h2>${esc(monthLong(month))}</h2><p>${esc(year.month_lines[month] ?? "")}</p></div>`
+          }
           <span class="slots">${events.length} ${events.length === 1 ? "event" : "events"}</span>
         </div>
-        ${events.length ? `<div class="event-grid" id="event-grid">${cards}</div><button class="secondary more-btn" type="button" id="events-more" aria-controls="event-grid" hidden>Show more <span class="muted">(<span class="more-count">0</span> more)</span></button>` : `<p class="empty-month">No events this month${filter.strand || filter.state ? " for this filter" : ""}.</p>`}
+        ${events.length ? `<div class="event-grid" id="event-grid">${cards}</div><button class="secondary more-btn" type="button" id="events-more" aria-controls="event-grid" hidden>Show more <span class="muted">(<span class="more-count">0</span> more)</span></button>` : searching ? `<p class="empty-month">No events match that search${filter.strand || filter.state ? " and filter" : ""}.</p>` : `<p class="empty-month">No events this month${filter.strand || filter.state ? " for this filter" : ""}.</p>`}
       </section>
     </div>`;
 }
@@ -572,7 +587,7 @@ export function editorBody(model: EditorModel): string {
       <h2>Event photos</h2>
       ${
         event
-          ? `<p class="help">Up to ${MAX_PHOTOS} photos. JPEG, PNG or WebP under 5 MB each. Phone photos are fine: we resize them and remove location data.</p>
+          ? `<p class="help">Up to ${MAX_PHOTOS} photos. Sideways (landscape) photos, from 1200 × 800 up to 3000 × 2000, JPEG, PNG or WebP under 5 MB each. Best: 2400 × 1600. We remove location data.</p>
         <div class="field">
           <label for="photo-files">Add photos <span class="slots" id="slots">${photos.length} of ${MAX_PHOTOS}</span></label>
           <input id="photo-files" type="file" accept="image/jpeg,image/png,image/webp" multiple${photos.length >= MAX_PHOTOS ? " disabled" : ""}>
@@ -676,7 +691,8 @@ export const EDITOR_SCRIPT = `
   var eventId = form.getAttribute("data-id");
   var theme = form.getAttribute("data-theme");
   var dirty = false;
-  form.addEventListener("input", function () { dirty = true; });
+  // Choosing photos is not an edit to the form (they upload on their own).
+  form.addEventListener("input", function (event) { if (event.target && event.target.type === "file") return; dirty = true; });
 
   // Tabs
   var tabs = Array.prototype.slice.call(document.querySelectorAll("[data-tab]")).filter(function (el) { return el.tagName === "BUTTON"; });
@@ -801,7 +817,7 @@ export const EDITOR_SCRIPT = `
   files.addEventListener("change", function () {
     var selected = Array.prototype.slice.call(files.files || []);
     if (!selected.length) return;
-    if (dirty && !window.confirm("You have unsaved changes in the form. Uploading reloads the page and they will be lost. Continue?")) {
+    if (dirty && !window.confirm("You have unsaved changes. Uploading reloads the page; after it, press Restore to get your changes back. Continue?")) {
       files.value = "";
       return;
     }
@@ -916,7 +932,7 @@ export const EDITOR_SCRIPT = `
     saveOrder(dragged.querySelector(".photo-status"));
   });
 })();
-`;
+` + autosaveScript("event-form", "event", "data-id", "notice");
 
 // ---- Preview -----------------------------------------------------------
 
@@ -1107,7 +1123,7 @@ export function rhythmBody(cards: RhythmRow[], strands: FilterRow[], error: stri
       </form>
       <div class="field rhythm-photo">
         ${card.photo ? `<img src="${esc(card.photo)}" alt="" width="120" height="90" loading="lazy">` : ""}
-        <div><label for="rp-${esc(card.id)}">${card.photo ? "Replace photo" : "Add a photo"} <span class="muted">(optional, cropped to 4:3)</span></label>
+        <div><label for="rp-${esc(card.id)}">${card.photo ? "Replace photo" : "Add a photo"} <span class="muted">(optional, landscape 1200 × 800 to 3000 × 2000, cropped to 4:3)</span></label>
         <input id="rp-${esc(card.id)}" class="rhythm-file" type="file" accept="image/jpeg,image/png,image/webp" data-id="${esc(card.id)}">
         <p class="help" role="status"></p></div>
       </div>
@@ -1195,7 +1211,7 @@ export function settingsBody(
     </form>
     <section class="panel">
       <h2>Share image</h2>
-      <p class="help">Shown when the page link is shared. Cropped to 1200 × 630. Without one, the hero image is used.</p>
+      <p class="help">Shown when the page link is shared. Sideways (landscape) photo, from 1200 × 800 up to 3000 × 2000, under 5 MB. Cropped to 1200 × 630. Without one, the hero image is used.</p>
       ${year.share_image ? `<img class="share-preview" src="${esc(year.share_image)}" alt="" width="1200" height="630">` : ""}
       <div class="field mt"><label for="share-file">${year.share_image ? "Replace" : "Upload"} share image</label>
         <input id="share-file" type="file" accept="image/jpeg,image/png,image/webp" data-url="/api/admin/calendar/settings/share-image">

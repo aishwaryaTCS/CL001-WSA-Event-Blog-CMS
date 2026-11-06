@@ -1,18 +1,24 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import sharp from "sharp";
 import { ROOT } from "./root.ts";
-import { COPY, COVER_HEIGHT, COVER_PATH, COVER_WIDTH } from "./schemas.ts";
+import { COPY, COVER_HEIGHT, COVER_PATH, COVER_WIDTH, checkCoverUpload } from "./schemas.ts";
 
 export const UPLOADS_DIR = path.join(ROOT, "uploads");
 const MAX_BYTES = 5 * 1024 * 1024;
 
+const DIMENSION_COPY = {
+  small: COPY.photoSize,
+  large: COPY.photoTooLarge,
+  shape: COPY.photoShape,
+} as const;
+
 export class PhotoError extends Error {
   readonly kind: "size" | "type" | "dimensions";
-  constructor(kind: "size" | "type" | "dimensions") {
-    super(kind === "dimensions" ? COPY.photoSize : COPY.photoRejected);
+  constructor(kind: "size" | "type" | "dimensions", message?: string) {
+    super(message ?? (kind === "dimensions" ? COPY.photoSize : COPY.photoRejected));
     this.kind = kind;
   }
 }
@@ -30,11 +36,12 @@ export function fileForCover(coverImage: string | null): string | null {
   return full;
 }
 
+/** Best effort: the note is already deleted or saved, so a file that cannot be removed is only logged. */
 export async function removeCover(coverImage: string | null): Promise<void> {
   const full = fileForCover(coverImage);
   if (!full) return;
   await unlink(full).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error;
+    if (error.code !== "ENOENT") console.error(`Could not remove old photo ${path.basename(full)}: ${error.code ?? error.message}`);
   });
 }
 
@@ -42,7 +49,9 @@ export async function coverSize(coverImage: string): Promise<{ width: number; he
   const full = fileForCover(coverImage);
   if (!full) return null;
   try {
-    const meta = await sharp(full).metadata();
+    // Read into memory first: opening the path directly lets sharp keep the file open,
+    // which on Windows stops a later delete or replace of the same file.
+    const meta = await sharp(await readFile(full)).metadata();
     if (!meta.width || !meta.height) return null;
     return { width: meta.width, height: meta.height };
   } catch {
@@ -57,6 +66,12 @@ export async function saveUpload(req: IncomingMessage): Promise<{ coverImage: st
     const meta = await sharp(file, { limitInputPixels: 40_000_000, animated: false }).metadata();
     if (meta.format !== "jpeg" && meta.format !== "png" && meta.format !== "webp") throw new PhotoError("type");
     if (!meta.width || !meta.height) throw new PhotoError("type");
+    // EXIF orientations 5–8 turn the photo on its side, so width and height swap once rotated.
+    const turned = (meta.orientation ?? 1) >= 5;
+    const shownWidth = turned ? meta.height : meta.width;
+    const shownHeight = turned ? meta.width : meta.height;
+    const problem = checkCoverUpload(shownWidth, shownHeight);
+    if (problem) throw new PhotoError("dimensions", DIMENSION_COPY[problem]);
     output = await sharp(file, { limitInputPixels: 40_000_000, animated: false })
       .rotate()
       .resize(COVER_WIDTH, COVER_HEIGHT, { fit: "cover", position: "centre" })
@@ -74,6 +89,35 @@ export async function saveUpload(req: IncomingMessage): Promise<{ coverImage: st
     width: output.info.width,
     height: output.info.height,
   };
+}
+
+/** Share image for a whole page: any landscape photo, cropped to 1200 × 630 (the size WhatsApp and Facebook show). */
+export const SHARE_WIDTH = 1200;
+export const SHARE_HEIGHT = 630;
+export async function saveShareUpload(req: IncomingMessage): Promise<string> {
+  const file = await readFilePart(req);
+  let output: { data: Buffer; info: sharp.OutputInfo };
+  try {
+    const meta = await sharp(file, { limitInputPixels: 40_000_000, animated: false }).metadata();
+    if (meta.format !== "jpeg" && meta.format !== "png" && meta.format !== "webp") throw new PhotoError("type");
+    if (!meta.width || !meta.height) throw new PhotoError("type");
+    const turned = (meta.orientation ?? 1) >= 5;
+    const shownWidth = turned ? meta.height : meta.width;
+    const shownHeight = turned ? meta.width : meta.height;
+    const problem = checkCoverUpload(shownWidth, shownHeight);
+    if (problem) throw new PhotoError("dimensions", DIMENSION_COPY[problem]);
+    output = await sharp(file, { limitInputPixels: 40_000_000, animated: false })
+      .rotate()
+      .resize(SHARE_WIDTH, SHARE_HEIGHT, { fit: "cover", position: "centre" })
+      .webp({ quality: 80 })
+      .toBuffer({ resolveWithObject: true });
+  } catch (error) {
+    if (error instanceof PhotoError) throw error;
+    throw new PhotoError("type");
+  }
+  const name = `${randomBytes(16).toString("hex")}.webp`;
+  await writeFile(path.join(UPLOADS_DIR, name), output.data);
+  return `/api/uploads/${name}`;
 }
 
 async function readFilePart(req: IncomingMessage): Promise<Buffer> {

@@ -56,7 +56,9 @@ export const COPY = {
   tickNames: "Tick names before publishing.",
   tickBoth: "Tick photo and names before publishing.",
   photoRejected: "Photo must be a JPEG, PNG, or WebP under 5 MB.",
-  photoSize: "Photo must be at least 1200 × 800 pixels.",
+  photoSize: "Photo is too small. Use at least 1200 × 800.",
+  photoTooLarge: "Photo is too big. Use up to 3000 × 2000.",
+  photoShape: "Use a sideways (landscape) photo. Standing or square photos do not fit.",
   cardCut: "The card will end this line with …",
   about60: "About 60 characters.",
   about160: "About 160 characters.",
@@ -71,11 +73,11 @@ export const COPY = {
   draftSaved: "Draft saved.",
   published: "Published.",
   deleteDraft: "Delete this draft? This cannot be undone.",
+  deletePublishedNote: "Delete this note? It comes off the website at once. This cannot be undone.",
   unpublish: "Unpublish this note? The page comes off the site. The URL is kept so you can publish it again.",
   previewDirty: "Save the draft to preview.",
   previewBar: "Only you can see this.",
   signInRequired: "Sign in required.",
-  deletePublished: "Unpublish this note before deleting it.",
   notFound: "Not found.",
   badDate: "Use a real calendar date.",
   badDateLabel: "Choose a term and week from the lists.",
@@ -88,6 +90,28 @@ export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const COVER_PATH = /^\/api\/uploads\/[a-f0-9]{32}\.webp$/;
 export const COVER_WIDTH = 1200;
 export const COVER_HEIGHT = 800;
+
+/** Uploaded cover photo limits, before it is cropped to COVER_WIDTH × COVER_HEIGHT. */
+export const COVER_UPLOAD = {
+  minWidth: 1200,
+  minHeight: 800,
+  maxWidth: 3000,
+  maxHeight: 2000,
+  /** Width ÷ height. 4:3 is 1.333, 16:9 is 1.778; a little slack for photos cropped by hand. */
+  minRatio: 1.3,
+  maxRatio: 1.8,
+} as const;
+
+export type CoverUploadProblem = "small" | "large" | "shape";
+
+/** Checks the photo as it will be shown, after any rotation. */
+export function checkCoverUpload(width: number, height: number): CoverUploadProblem | null {
+  const ratio = width / height;
+  if (ratio < COVER_UPLOAD.minRatio || ratio > COVER_UPLOAD.maxRatio) return "shape";
+  if (width < COVER_UPLOAD.minWidth || height < COVER_UPLOAD.minHeight) return "small";
+  if (width > COVER_UPLOAD.maxWidth || height > COVER_UPLOAD.maxHeight) return "large";
+  return null;
+}
 
 export type Pillar = "think" | "build" | "belong";
 export type NoteStatus = "draft" | "published";
@@ -218,37 +242,16 @@ export function resolveSeoFields(
   const titleTrim = incomingTitle.trim();
   const descriptionTrim = incomingDescription.trim();
 
-  let seoTitle: string | null;
-  if (previous) {
-    const previousAutoTitle = autoSeoTitle(previous.title);
-    if (previous.seo_title === null || previous.seo_title === previousAutoTitle) {
-      seoTitle = headline ? newAutoTitle : null;
-    } else if (!titleTrim) {
-      seoTitle = headline ? newAutoTitle : null;
-    } else {
-      seoTitle = titleTrim.slice(0, 200);
-    }
-  } else if (!titleTrim) {
-    seoTitle = headline ? newAutoTitle : null;
-  } else {
-    seoTitle = titleTrim.slice(0, 200);
-  }
+  // A field counts as automatic when it is empty, or still holds the automatic text for the
+  // old or the new headline/summary. Anything else the admin typed is kept as a custom value.
+  const previousAutoTitle = previous ? autoSeoTitle(previous.title) : null;
+  const titleIsAuto = !titleTrim || titleTrim === newAutoTitle || titleTrim === previousAutoTitle;
+  const seoTitle: string | null = titleIsAuto ? (headline ? newAutoTitle : null) : titleTrim.slice(0, 200);
 
-  let seoDescription: string | null;
-  if (previous) {
-    const previousAutoDescription = autoSeoDescription(previous.excerpt);
-    if (previous.seo_description === null || previous.seo_description === previousAutoDescription) {
-      seoDescription = newAutoDescription;
-    } else if (!descriptionTrim) {
-      seoDescription = newAutoDescription;
-    } else {
-      seoDescription = descriptionTrim.slice(0, 300);
-    }
-  } else if (!descriptionTrim) {
-    seoDescription = newAutoDescription;
-  } else {
-    seoDescription = descriptionTrim.slice(0, 300);
-  }
+  const previousAutoDescription = previous ? autoSeoDescription(previous.excerpt) : null;
+  const descriptionIsAuto =
+    !descriptionTrim || descriptionTrim === newAutoDescription || descriptionTrim === previousAutoDescription;
+  const seoDescription: string | null = descriptionIsAuto ? newAutoDescription : descriptionTrim.slice(0, 300);
 
   return { seoTitle, seoDescription };
 }

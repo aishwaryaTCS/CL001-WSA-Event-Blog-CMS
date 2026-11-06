@@ -154,7 +154,7 @@ table.counts th { font-family: var(--font-mono); font-size: 10px; letter-spacing
 .month-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--grey-200); }
 .month-head h2 { font-size: 36px; }
 .month-head p { margin-top: 6px; color: var(--grey-700); font-family: var(--font-serif); font-style: italic; }
-.filters-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 0 0 20px; }
+.filters-row { display: flex; flex-wrap: wrap; gap: 12px 14px; align-items: end; margin: 32px 0 26px; }
 .filters-row .field { margin: 0; min-width: 180px; }
 .filters-row button { margin-top: 0; }
 .event-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
@@ -283,7 +283,7 @@ button.danger:hover { background: var(--coral-200); border-color: var(--coral-70
 .overlay-cols p.body { margin-top: 14px; font-size: 15px; line-height: 1.75; color: var(--grey-800); white-space: pre-line; }
 .overlay-cols ul { margin: 12px 0 0; padding-left: 18px; font-size: 14px; line-height: 1.65; }
 .preview-photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
-.preview-photos img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; }
+.preview-photos img { width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: cover; display: block; }
 
 @media (max-width: 860px) {
   .cal-layout { grid-template-columns: 1fr; gap: 20px; }
@@ -399,7 +399,8 @@ button.danger:hover { background: var(--coral-200); border-color: var(--coral-70
 }
 .sheet .row-line .check input { margin-top: 0; }
 .sheet .filters-row { align-items: flex-end; }
-.sheet .filters-row button { min-height: 48px; }
+.sheet .filters-row button, .sheet .filters-row a.button { min-height: 48px; margin-top: 0; }
+.filters-row .field input[type="search"] { min-width: 240px; }
 .bar-actions { align-items: center; }
 .bar-actions form { margin: 0; display: inline-flex; }
 .bar-actions button, .bar-actions a, .actions button, .actions a { margin-top: 0; }

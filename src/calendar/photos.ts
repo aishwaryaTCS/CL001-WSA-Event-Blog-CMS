@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import path from "node:path";
 import sharp from "sharp";
 import { UPLOADS_DIR } from "../photos.ts";
+import { COPY, checkCoverUpload } from "../schemas.ts";
 import { referencedPaths } from "./db.ts";
 import { CAL_COPY, PHOTO_NAME } from "./schemas.ts";
 
@@ -41,11 +42,18 @@ function newName(): string {
   return randomBytes(16).toString("hex");
 }
 
+// Same size and shape rules as blog cover photos: landscape, 1200 × 800 up to 3000 × 2000.
+const SIZE_COPY = { small: COPY.photoSize, large: COPY.photoTooLarge, shape: COPY.photoShape } as const;
+
 async function decode(file: Buffer): Promise<() => sharp.Sharp> {
   try {
     const meta = await sharp(file, { limitInputPixels: PIXEL_LIMIT, animated: false }).metadata();
     if (meta.format !== "jpeg" && meta.format !== "png" && meta.format !== "webp") throw new CalendarPhotoError(415);
     if (!meta.width || !meta.height) throw new CalendarPhotoError(415);
+    // EXIF orientations 5–8 turn the photo on its side, so check it as it will be shown.
+    const turned = (meta.orientation ?? 1) >= 5;
+    const problem = checkCoverUpload(turned ? meta.height : meta.width, turned ? meta.width : meta.height);
+    if (problem) throw new CalendarPhotoError(400, SIZE_COPY[problem]);
   } catch (error) {
     if (error instanceof CalendarPhotoError) throw error;
     throw new CalendarPhotoError(415);

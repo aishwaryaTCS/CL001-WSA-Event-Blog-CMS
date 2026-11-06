@@ -6,6 +6,8 @@ import { mountAdmin } from "./admin-routes.ts";
 import { adminCount, createAdmin, migrate, openDatabase, seedNotes } from "./db.ts";
 import { ensureUploads } from "./photos.ts";
 import { mountPublic } from "./public-routes.ts";
+import { mountSite } from "./site.ts";
+import { mountHelp } from "./help.ts";
 import { mountCalendarAdmin } from "./calendar/admin-routes.ts";
 import { ensureCalendarUploads, sweepCalendarUploads } from "./calendar/photos.ts";
 import { mountCalendarPublic } from "./calendar/public-routes.ts";
@@ -97,6 +99,8 @@ async function main(): Promise<void> {
   mountPublic(app);
   mountCalendarPublic(app);
   mountAdmin(app);
+  mountSite(app);
+  mountHelp(app);
   mountCalendarAdmin(app);
   app.get("/", (_req, res) => {
     res.redirect("/admin");
@@ -107,10 +111,25 @@ async function main(): Promise<void> {
   app.use((_req, res) => {
     res.redirect("/admin");
   });
-  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error("Request failed.");
+  app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const info = (error && typeof error === "object" ? error : {}) as { type?: string; message?: string; code?: string; name?: string };
+    // Body-parser problems are the sender's fault: answer 400 / 413, not 500.
+    const clientProblem =
+      info.type === "entity.parse.failed" ? { status: 400, message: "Request could not be read." }
+      : info.type === "entity.too.large" ? { status: 413, message: "Request is too large." }
+      : null;
+    // Log enough to trace the problem, but never a connection string.
+    const detail = String(info.message ?? error).replace(/\w+:\/\/\S+/g, "[url]").slice(0, 300);
+    console.error(
+      `Request failed: ${req.method} ${req.path} -> ${clientProblem?.status ?? 500}`,
+      `${info.name ?? "Error"}${info.code ? ` (${info.code})` : ""}: ${detail}`,
+    );
     if (res.headersSent) {
       next(error);
+      return;
+    }
+    if (clientProblem) {
+      res.status(clientProblem.status).json({ error: clientProblem.message });
       return;
     }
     res.status(500).json({ error: "Something went wrong." });

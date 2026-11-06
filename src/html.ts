@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import type { NoteRow } from "./db.ts";
+import { autosaveScript } from "./autosave.ts";
 import {
   CARD_EXCERPT_CHARS,
   CARD_TITLE_CHARS,
   COPY,
   COVER_HEIGHT,
   COVER_PATH,
+  COVER_UPLOAD,
   COVER_WIDTH,
   DESIGNATIONS,
   SALUTATIONS,
@@ -44,13 +46,13 @@ function logo(): string {
   return `<img class="logo" src="/admin/brand/logo.png" alt="Wellsprings Academy" width="542" height="320">`;
 }
 
-function eyebrow(text: string, tone = ""): string {
+export function eyebrow(text: string, tone = ""): string {
   return `<p class="eyebrow${tone ? ` ${tone}` : ""}"><span class="rule" aria-hidden="true"></span>${esc(text)}</p>`;
 }
 
 export function page(title: string, body: string, signedIn: boolean, nonce: string): string {
   const mast = signedIn
-    ? `<header class="mast"><div class="mast-inner"><a href="/admin/home">${logo()}</a><nav><a href="/admin/home">Home</a><a href="/admin/notes">Notes</a><a href="/admin/calendar">Calendar</a><a href="/admin/password">Password</a><form method="post" action="/admin/logout"><button class="link" type="submit">Sign out</button></form></nav></div></header>`
+    ? `<header class="mast"><div class="mast-inner"><a href="/admin/home">${logo()}</a><nav><a href="/admin/home">Home</a><a href="/admin/notes">Notes</a><a href="/admin/calendar">Calendar</a><a href="/admin/site">Site &amp; SEO</a><a href="/admin/help">Help</a><a href="/admin/password">Password</a><form method="post" action="/admin/logout"><button class="link" type="submit">Sign out</button></form></nav></div></header>`
     : "";
   const foot = signedIn
     ? `<footer class="colophon"><div><span>Wellsprings Academy</span><span>Think · Build · Belong</span></div></footer>`
@@ -61,7 +63,8 @@ export function page(title: string, body: string, signedIn: boolean, nonce: stri
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>${esc(title)}</title>
+  <title>${esc(title)} · Wellsprings CMS</title>
+  <link rel="icon" type="image/png" sizes="48x48" href="/admin/brand/favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -132,16 +135,61 @@ export function passwordPage(error: string): string {
   </main>`;
 }
 
-export function notesPage(rows: NoteRow[]): string {
+/** Words the notes search looks through: headline, summary, teacher, school date, pillar, status, URL. */
+function searchText(row: NoteRow): string {
+  return [row.title, row.excerpt, row.author, row.date_label, row.pillar ?? "", row.status, row.slug ?? ""]
+    .join(" ")
+    .toLowerCase();
+}
+
+const NOTES_SEARCH_SCRIPT = `(() => {
+  const input = document.getElementById("note-search");
+  if (!input) return;
+  const items = Array.from(document.querySelectorAll(".search-item"));
+  const groups = Array.from(document.querySelectorAll("[data-search-group]"));
+  const count = document.getElementById("note-search-count");
+  const none = document.getElementById("note-search-none");
+  function run() {
+    const words = input.value.toLowerCase().trim().split(/\\s+/).filter(Boolean);
+    let shown = 0;
+    for (const item of items) {
+      const hit = words.every((word) => item.dataset.search.includes(word));
+      item.hidden = !hit;
+      if (hit) shown += 1;
+    }
+    for (const group of groups) {
+      const name = group.dataset.searchGroup;
+      const any = items.some((item) => item.dataset.group === name && !item.hidden);
+      group.hidden = !any;
+    }
+    count.textContent = words.length ? shown + (shown === 1 ? " note" : " notes") + " found." : "";
+    none.hidden = !words.length || shown > 0;
+  }
+  input.addEventListener("input", run);
+  input.addEventListener("keydown", (event) => { if (event.key === "Escape") { input.value = ""; run(); } });
+  run();
+})();`;
+
+export function notesPage(rows: NoteRow[], nonce = ""): string {
   const featured = rows.find((row) => row.featured) ?? null;
   const rest = featured ? rows.filter((row) => row.id !== featured.id) : rows;
   const published = rows.filter((row) => row.status === "published").length;
+  const item = (row: NoteRow, group: string, html: string) =>
+    `<div class="search-item" data-group="${group}" data-search="${esc(searchText(row))}">${html}</div>`;
   const list = rest.length
-    ? `<div class="note-grid">${rest.map((row) => noteCard(row)).join("")}</div>`
+    ? `<div class="note-grid">${rest.map((row) => item(row, "rest", noteCard(row))).join("")}</div>`
+    : "";
+  const search = rows.length
+    ? `<div class="list-search">
+        <label for="note-search">Search notes</label>
+        <input id="note-search" type="search" autocomplete="off" placeholder="Headline, summary, teacher, term or week">
+        <span id="note-search-count" class="help" role="status" aria-live="polite"></span>
+      </div>`
     : "";
   const body = rows.length
-    ? `${featured ? `<p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>This week's note</p>${featureCard(featured)}` : ""}
-       ${rest.length ? `<p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>${featured ? "More notes" : "All notes"}</p>${list}` : ""}`
+    ? `${featured ? `<div data-search-group="featured"><p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>This week's note</p></div>${item(featured, "featured", featureCard(featured))}` : ""}
+       ${rest.length ? `<div data-search-group="rest"><p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>${featured ? "More notes" : "All notes"}</p></div>${list}` : ""}
+       <p id="note-search-none" class="empty-search" hidden>No notes match that search.</p>`
     : `<div class="empty">${eyebrow("Nothing on the desk")}<h2>No notes yet.</h2><p class="intro">The first note you publish is what parents find on the website.</p></div>`;
   return `<main class="sheet">
     <header class="page-head">
@@ -160,8 +208,10 @@ export function notesPage(rows: NoteRow[]): string {
         <div><dt>This week</dt><dd>${featured ? "1" : "0"}</dd></div>
       </dl>
     </header>
+    ${search}
     ${body}
-  </main>`;
+  </main>
+  ${rows.length && nonce ? `<script nonce="${esc(nonce)}">${NOTES_SEARCH_SCRIPT}</script>` : ""}`;
 }
 
 export type EditorForm = NoteInput & {
@@ -305,9 +355,10 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
   const seoDescriptionValue = form.seoDescription ?? autoSeoDescription(form.excerpt) ?? "";
   const seoAutomatic = seoIsAutomatic(form.seoTitle, form.seoDescription, form.title, form.excerpt);
   const cover = form.coverImage && COVER_PATH.test(form.coverImage) ? form.coverImage : "";
+  const deleteBase = form.savedStatus === "published" ? COPY.deletePublishedNote : COPY.deleteDraft;
   const deleteConfirm = form.slugLocked && form.slug
-    ? `${COPY.deleteDraft} The URL /blog/${form.slug} will be given up.`
-    : COPY.deleteDraft;
+    ? `${deleteBase} The URL /blog/${form.slug} will be given up.`
+    : deleteBase;
   const pillarLabel = form.pillar ? form.pillar[0].toUpperCase() + form.pillar.slice(1) : "Pillar";
   const term1Weeks = Array.from({ length: 25 }, (_, index) => index + 1)
     .map((week) => `<option value="${week}"${parsedDate?.term === "1" && parsedDate.week === String(week) ? " selected" : ""}>Week ${week}</option>`)
@@ -443,7 +494,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           <input id="coverImage" name="coverImage" type="hidden" value="${esc(cover)}">
           <input id="coverWidth" name="coverWidth" type="hidden" value="${form.coverWidth ?? ""}">
           <input id="coverHeight" name="coverHeight" type="hidden" value="${form.coverHeight ?? ""}">
-          <span class="help">Any size. We crop to fit 1200 × 800. Keep faces near the centre. Small photos may look soft.</span>
+          <span class="help">Sideways (landscape) photo, from 1200 × 800 up to 3000 × 2000, under 5 MB. Best: 2400 × 1600.</span>
           <p id="photoError" class="error" role="status"></p>
           <div id="coverEmpty" class="frame wide blank${form.pillar ? ` tint-${form.pillar}` : ""}"${cover ? " hidden" : ""}></div>
           <img id="coverPreview" class="frame wide" alt="" width="${COVER_WIDTH}" height="${COVER_HEIGHT}"${cover ? ` src="${esc(cover)}"` : " hidden"}>
@@ -556,17 +607,17 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
     </aside>
     </div>
     ${
-      form.id && form.savedStatus === "published"
-        ? `<form class="danger-zone" method="post" action="/admin/notes/${esc(form.id)}/unpublish" data-confirm="${esc(COPY.unpublish)}"><button class="secondary" type="submit">Unpublish</button></form>`
-        : ""
-    }
-    ${
-      form.id && form.savedStatus === "draft"
-        ? `<form class="danger-zone" method="post" action="/admin/notes/${esc(form.id)}/delete" data-confirm="${esc(deleteConfirm)}"><button class="secondary" type="submit">Delete</button></form>`
+      form.id
+        ? `<div class="danger-zone actions">${
+            form.savedStatus === "published"
+              ? `<form method="post" action="/admin/notes/${esc(form.id)}/unpublish" data-confirm="${esc(COPY.unpublish)}"><button class="secondary" type="submit">Unpublish</button></form>`
+              : ""
+          }<form method="post" action="/admin/notes/${esc(form.id)}/delete" data-confirm="${esc(deleteConfirm)}"><button class="secondary" type="submit">Delete</button></form></div>`
         : ""
     }
   </main>
-    <script nonce="${esc(nonce)}">${editorScript(Boolean(form.id))}</script>`;
+    <script nonce="${esc(nonce)}">${editorScript(Boolean(form.id))}</script>
+    <script nonce="${esc(nonce)}">${autosaveScript("note-form", "note", "data-note-id", "explicit")}</script>`;
 }
 
 export function previewPage(note: NoteRow, more: NoteRow[]): string {
@@ -686,10 +737,14 @@ function editorScript(hasSavedNote: boolean): string {
     longHeadlineSeo: COPY.longHeadlineSeo,
     photoRejected: COPY.photoRejected,
     photoSize: COPY.photoSize,
+    photoTooLarge: COPY.photoTooLarge,
+    photoShape: COPY.photoShape,
     previewDirty: COPY.previewDirty,
   });
+  const coverUpload = JSON.stringify(COVER_UPLOAD);
   return `(() => {
     const copy = ${copy};
+    const coverUpload = ${coverUpload};
     const form = document.getElementById("note-form");
     if (!form) return;
     const title = document.getElementById("title");
@@ -995,10 +1050,35 @@ function editorScript(hasSavedNote: boolean): string {
         refresh();
       });
     }
+    // Quick check in the browser so the admin hears at once; the server checks again.
+    async function coverUploadProblem(file) {
+      if (!/^image\\/(jpeg|png|webp)$/.test(file.type) || file.size > 5 * 1024 * 1024) return copy.photoRejected;
+      if (typeof createImageBitmap !== "function") return null;
+      let size;
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        size = { width: bitmap.width, height: bitmap.height };
+        bitmap.close();
+      } catch {
+        return null;
+      }
+      if (!size.width || !size.height) return null;
+      const ratio = size.width / size.height;
+      if (ratio < coverUpload.minRatio || ratio > coverUpload.maxRatio) return copy.photoShape;
+      if (size.width < coverUpload.minWidth || size.height < coverUpload.minHeight) return copy.photoSize;
+      if (size.width > coverUpload.maxWidth || size.height > coverUpload.maxHeight) return copy.photoTooLarge;
+      return null;
+    }
     coverFile.addEventListener("change", async () => {
       const file = coverFile.files && coverFile.files[0];
       if (!file) return;
       photoError.textContent = "";
+      const early = await coverUploadProblem(file);
+      if (early) {
+        photoError.textContent = early;
+        coverFile.value = "";
+        return;
+      }
       try {
         const data = new FormData();
         data.append("file", file);
@@ -1066,6 +1146,7 @@ function editorScript(hasSavedNote: boolean): string {
         form.action = "/admin/notes/" + noteId;
         hasSavedNote = true;
         dirty = false;
+        if (window.wsaAutosaveClear) window.wsaAutosaveClear();
         window.location.assign("/admin/notes/" + noteId + "?notice=" + (intent === "published" ? "published" : "draft"));
       } catch {
         formStatus.textContent = "Something went wrong.";
@@ -1096,7 +1177,7 @@ function sizeAttrs(note: NoteRow): string {
   return ` width="${note.cover_width}" height="${note.cover_height}"`;
 }
 
-function esc(value: string): string {
+export function esc(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

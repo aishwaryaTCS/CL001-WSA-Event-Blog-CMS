@@ -62,6 +62,11 @@ export function mountAdmin(app: Express): void {
     res.sendFile(path.join(ROOT, "src", "brand", "wellsprings-logo.png"));
   });
 
+  app.get("/admin/brand/favicon.png", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.sendFile(path.join(ROOT, "src", "brand", "favicon.png"));
+  });
+
   app.get("/admin", async (req, res, next) => {
     try {
       if (await adminFromRequest(req)) {
@@ -148,7 +153,7 @@ export function mountAdmin(app: Express): void {
   app.get("/admin/notes", requireAdmin, async (_req, res, next) => {
     try {
       const rows = await listNotes();
-      send(res, 200, "Notes", () => notesPage(rows), true);
+      send(res, 200, "Notes", (nonce) => notesPage(rows, nonce), true);
     } catch (error) {
       next(error);
     }
@@ -221,10 +226,6 @@ export function mountAdmin(app: Express): void {
       const note = await loadNote(req.params.id);
       if (!note) {
         res.redirect("/admin/notes");
-        return;
-      }
-      if (note.status !== "draft") {
-        res.redirect(`/admin/notes/${note.id}`);
         return;
       }
       const deleted = await deleteNote(note.id);
@@ -303,10 +304,6 @@ export function mountAdmin(app: Express): void {
       const note = await loadNote(req.params.id);
       if (!note) {
         res.status(404).json({ error: COPY.notFound });
-        return;
-      }
-      if (note.status !== "draft") {
-        res.status(400).json({ error: COPY.deletePublished });
         return;
       }
       const deleted = await deleteNote(note.id);

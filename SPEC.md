@@ -40,7 +40,7 @@ Teachers have no account.
 - Admin sign in, sign out, and change password.
 - List of notes: title, school date, Draft or Published, and which one is this week’s note.
 - Create, edit, save draft, preview, publish, unpublish.
-- Delete a draft, after confirmation. A published note is unpublished, not deleted.
+- Delete a draft or a published note, after one confirmation.
 - One cover photo per note.
 - One featured note. Choosing a new one clears the old one. Unpublish clears it too.
 - Search title and search description, filled from the headline and summary. The admin changes them only when the headline is too long for Google.
@@ -137,7 +137,7 @@ The line under the button names the first failure, in that order. “Add the hea
 
 **FR-10 Unpublish.** Confirmation: “Unpublish this note? The page comes off the site. The URL is kept so you can publish it again.” Confirm sets `status` to `draft` on the saved row and clears `featured`. The slug, the lock, and the photo stay. The form is not saved by this action.
 
-**FR-11 Delete.** Offered only when the saved status is `draft`. Confirmation: “Delete this draft? This cannot be undone.” If `slug_locked` is true, add “The URL /blog/{slug} will be given up.” Confirm deletes the row and its file under `uploads`. A published row has no delete action. The API returns 400 `{ "error": "Unpublish this note before deleting it." }`.
+**FR-11 Delete.** Offered on every saved note, draft or published, with one confirmation. Draft: “Delete this draft? This cannot be undone.” Published: “Delete this note? It comes off the website at once. This cannot be undone.” If `slug_locked` is true, add “The URL /blog/{slug} will be given up.” Confirm deletes the row and its file under `uploads`; a deleted featured note leaves no featured note. If the photo file cannot be removed, the delete still succeeds and the server logs it. The API returns 204.
 
 **FR-12 Preview.** `/admin/notes/:id/preview` shows the last saved note, including a draft or a future date, in the article layout described in FR-21. Bar: “Only you can see this.” The page sends `noindex`. Signed-out visitors go to `/admin`. Unsaved editor changes are not previewed. The editor shows “Save the draft to preview.”
 
@@ -163,7 +163,7 @@ The line under the button names the first failure, in that order. “Add the hea
 
 **FR-21 Article.** Full headline, school date, teacher and class, cover, caption, and every paragraph. The first paragraph keeps the existing larger style. Up to two other visible notes sit at the bottom, newest first, excluding this note. The block is omitted when there are none.
 
-The featured block and the article keep the current 21:9 frame. Cards keep 3:2. The same file is used in all three, cropped by the frame with `object-fit: cover`. A missing photo is an empty paper frame, not a broken image. Seeded notes have no photo, so they use that frame until an admin adds one.
+The article and the cards use a 3:2 frame, the same shape as the stored file, so the whole photo shows. The featured block on the website `/blog` keeps its original wide 21:9 frame, so about 18% of the photo's top and bottom is cut there. The same file is used in all three, cropped by the frame with `object-fit: cover`. A missing photo is an empty paper frame, not a broken image. Seeded notes have no photo, so they use that frame until an admin adds one.
 
 **FR-22 Missing address.** A slug that is absent, draft, or still in the future sends the browser to `/blog` with a temporary redirect, status 302. It must not use 301. The public API returns 404 `{ "error": "Not found." }`.
 
@@ -246,7 +246,7 @@ The table from FR-7. Empty copy, which the seed makes unlikely: “No notes yet.
 
 | Label | Publish | Helper |
 | --- | --- | --- |
-| Cover photo | Required. Stored at exactly 1200 × 800. | Any size. We crop to fit 1200 × 800. Keep faces near the centre. Small photos may look soft. |
+| Cover photo | Required. Stored at exactly 1200 × 800. | Sideways (landscape) photo, from 1200 × 800 up to 3000 × 2000, under 5 MB. Best: 2400 × 1600. (Upload is refused outside these limits; shape check allows width ÷ height 1.3–1.8.) |
 | What is in the photo | Required when a cover is stored | For screen readers. Describe the scene. |
 | Caption | Optional | One line under the photo. |
 
@@ -273,11 +273,21 @@ The table from FR-7. Empty copy, which the seed makes unlikely: “No notes yet.
 | Photo is allowed | Tick if a parent has agreed, or if no child’s face can be recognised. Shown only when the switch is on. |
 | Names are allowed | Tick if no child is named, or if a named child’s parent has agreed. If they have not, write “a child in Grade 3”. Shown only when the switch is on. |
 
-Buttons: “Save draft”, then “Publish” or “Update”. The FR-9 line sits under Publish. A successful save shows “Draft saved.” or “Published.” and stays on the editor. “Unpublish” sits away from “Delete”. “Delete” is rendered only for a draft.
+Buttons: “Save draft”, then “Publish” or “Update”. The FR-9 line sits under Publish. A successful save shows “Draft saved.” or “Published.” and stays on the editor. “Unpublish” sits away from “Delete”. “Delete” is rendered for every saved note.
 
 ### Change password
 
 Current password, new password, confirm new password, “Change password”.
+
+### Site & SEO
+
+Menu item “Site & SEO” at `/admin/site`. Search and sharing details for whole public pages (notes and events keep their own section in their editors). Stored in `site_pages` (migration `005_site_pages.sql`), seeded with the wording the website used before.
+
+- **Blog page · /blog:** Search title (required, ≤ 200, about 60), Search description (required, ≤ 300, about 160), Share title and Share description (optional; empty uses the search fields), What is in the share image (≤ 160; required once a share image exists).
+- **Share image · /blog:** same photo rules as a note cover; cropped to 1200 × 630 WebP. Upload, replace, remove. Without one, the website uses its own blog photo.
+- **Calendar page:** link to Calendar → Page & SEO, where each school year keeps its own details.
+
+The website `/blog` head reads `page` from `GET /api/blog`; if the CMS is down it uses its original wording. Every admin tab shows the school icon and “{Page} · Wellsprings CMS”.
 
 ### Preview
 
@@ -360,7 +370,7 @@ No cookie. The website server calls these.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /api/blog` | `{ "featured": PublicNote or null, "posts": PublicNote[] }`. `posts` excludes the featured note. |
+| `GET /api/blog` | `{ "featured": PublicNote or null, "posts": PublicNote[], "page": { seoTitle, seoDescription, shareTitle, shareDescription, shareImage, shareImageAlt } }`. `posts` excludes the featured note. `page` is the /blog page's search and sharing details from Site & SEO (empty share fields already fall back to the search fields). |
 | `GET /api/blog/:slug` | `{ "post": PublicNote, "more": PublicNote[] }` or 404. |
 | `GET /api/uploads/:name` | The WebP bytes, or 404. |
 
@@ -380,7 +390,7 @@ All send `Cache-Control: no-store`. All except login require the cookie.
 | `GET /api/admin/posts/:id` | Admin note, including consent and `slugLocked`. |
 | `PATCH /api/admin/posts/:id` | Save. Slug is ignored when `slug_locked` is true. |
 | `POST /api/admin/posts/:id/unpublish` | Sets draft and clears featured. Does not apply form fields. |
-| `DELETE /api/admin/posts/:id` | Draft only. 204. |
+| `DELETE /api/admin/posts/:id` | Draft or published. 204. |
 | `POST /api/admin/uploads` | Multipart field `file`. Success `{ "coverImage", "width", "height" }`. |
 
 Admin note JSON adds `includesStudent`, `photoConsent`, `nameConsent`, `authorTitle`, `authorFirstName`, `authorLastName`, `authorDesignation`, `authorGrade`, `seoAutomatic`, `slugLocked`, `status`, `createdAt`, `updatedAt`.
@@ -468,6 +478,6 @@ Run the CMS against the migrated `wellspringscms` database, with the website on 
 
 1. **A parent can read the notes.** Signed out, open `/blog`. The three seeded notes are there, plus a fourth the admin published with a real cover. The featured note is the large block. Cards match in height. A short summary still fills the card. The article shows the full headline and the full note, and up to two other notes at the bottom. The tab title of a seeded note ends with `Notes from school | Wellsprings Academy`.
 2. **An admin can run a note.** Sign in on port 3002. Save a draft with a headline longer than 70 characters and see the card warning. Preview shows the article layout and “Only you can see this.” With either tick off, or with no pillar or no photo, Publish stays off and the line names the gap. Turn the ticks on, add the missing fields, and publish. Change password refuses a wrong current password, accepts a new one, and asks for sign-in again. The old cookie no longer opens the notes list.
-3. **Hidden notes stay hidden.** A draft does not appear on `/blog` or at its slug. A published note with tomorrow’s Kolkata date does not appear. Unpublish removes it and clears “this week’s note”. The address can be published again. Delete is not offered while it is published.
+3. **Hidden notes stay hidden.** A draft does not appear on `/blog` or at its slug. A published note with tomorrow’s Kolkata date does not appear. Unpublish removes it and clears “this week’s note”. The address can be published again. Delete works on drafts and published notes with one confirmation.
 4. **Search and share.** When the search fields are filled, the document title and the share title are the search title, and the share image is the cover.
 5. **Git.** `git status` in the CMS folder does not list `.env` or anything under `uploads`.

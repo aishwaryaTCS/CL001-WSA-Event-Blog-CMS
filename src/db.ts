@@ -314,7 +314,7 @@ export async function unpublishNote(id: string): Promise<NoteRow | null> {
 }
 
 export async function deleteNote(id: string): Promise<NoteRow | null> {
-  const result = await pool.query(`delete from blog_posts where id = $1 and status = 'draft' returning ${NOTE_COLUMNS}`, [id]);
+  const result = await pool.query(`delete from blog_posts where id = $1 returning ${NOTE_COLUMNS}`, [id]);
   return result.rows[0] ? mapNote(result.rows[0]) : null;
 }
 

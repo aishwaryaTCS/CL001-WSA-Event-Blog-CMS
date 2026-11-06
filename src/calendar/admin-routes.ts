@@ -394,15 +394,27 @@ export function mountCalendarAdmin(app: Express): void {
       const strandFilter = idParam(req.query.strand) ?? "";
       const states = ["draft", "upcoming", "needs-photos", "completed", "cancelled"];
       const stateFilter = typeof req.query.state === "string" && states.includes(req.query.state) ? req.query.state : "";
+      const search = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 80) : "";
+      const words = search.toLowerCase().split(/\s+/).filter(Boolean);
       const [all, { strands }] = await Promise.all([listed(year.id, today), yearFilters(year.id)]);
+      const strandName = new Map(strands.map((row) => [row.id, row.name]));
+      // Search looks through the whole school year: title, subtitle, grades, plan, recap and strand.
+      const found = (item: (typeof all)[number]): boolean => {
+        if (!words.length) return true;
+        const text = [item.row.title, item.row.subtitle, item.row.grades_label, item.row.body, item.row.recap, strandName.get(item.row.strand_id) ?? ""]
+          .join(" ")
+          .toLowerCase();
+        return words.every((word) => text.includes(word));
+      };
       const shown = all.filter(
         (item) =>
-          item.row.start_date.startsWith(month) &&
+          (words.length ? true : item.row.start_date.startsWith(month)) &&
+          found(item) &&
           (!strandFilter || item.row.strand_id === strandFilter) &&
           (!stateFilter || item.state === stateFilter || (stateFilter === "upcoming" && item.state === "today")),
       );
       send(res, 200, "Events", "events", year, () =>
-        eventsBody(year, month, shown, all, strands, { strand: strandFilter, state: stateFilter }, noticeFrom(req)),
+        eventsBody(year, month, shown, all.filter(found), strands, { strand: strandFilter, state: stateFilter, q: search }, noticeFrom(req)),
       );
     } catch (error) {
       next(error);
