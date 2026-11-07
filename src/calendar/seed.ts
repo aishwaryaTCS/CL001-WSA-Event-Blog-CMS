@@ -111,6 +111,11 @@ export async function seedCalendar(): Promise<void> {
           photo_consent: false,
           seo_title: autoEventSeoTitle(event.title, YEAR.theme),
           seo_description: autoEventSeoDescription(event.subtitle, event.body),
+          seo_keywords: "",
+          seo_noindex: false,
+          seo_canonical: "",
+          seo_schema_type: "",
+          seo_schema_json: "",
           status: "published",
         });
       }

@@ -8,6 +8,8 @@ import {
   currentYear,
   deleteDraftEvent,
   deleteFilter,
+  deleteYear,
+  yearUsage,
   deleteRhythm,
   eventById,
   eventsForYear,
@@ -33,7 +35,9 @@ import {
   updateMonthLines,
   updatePhotoMeta,
   updateRhythm,
-  updateYearSettings,
+  updateYearSpan,
+  updateYearTheme,
+  eventsOutside,
   withTx,
   yearById,
   type EventRow,
@@ -44,6 +48,9 @@ import {
 import {
   COUNTER_SCRIPT,
   EDITOR_SCRIPT,
+  EVENT_SEO_SCRIPT,
+  RHYTHM_SCRIPT,
+  YEARS_SCRIPT,
   UPLOAD_SCRIPT,
   blankValues,
   calendarShell,
@@ -84,9 +91,10 @@ import {
   photoMetaSchema,
   photoOrderSchema,
   rhythmSchema,
-  settingsSchema,
+  themeSchema,
+  newYearThemeSchema,
+  yearSpan,
   slugBase,
-  yearSchema,
   type ColorKey,
   type EventInput,
 } from "./schemas.ts";
@@ -102,6 +110,11 @@ class Rejection extends Error {
 }
 
 // ---- Shared helpers ----------------------------------------------------
+
+const MONTH_LABEL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function monthName(iso: string): string {
+  return `${MONTH_LABEL[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
+}
 
 function send(
   res: Response,
@@ -125,7 +138,7 @@ function idParam(value: unknown): string | null {
   return UUID.test(text) ? text : null;
 }
 
-async function workingYear(req: Request): Promise<YearRow | null> {
+export async function workingYear(req: Request): Promise<YearRow | null> {
   const chosen = idParam(req.signedCookies?.[YEAR_COOKIE]);
   if (chosen) {
     const year = await yearById(chosen);
@@ -136,7 +149,7 @@ async function workingYear(req: Request): Promise<YearRow | null> {
   return (await listYears())[0] ?? null;
 }
 
-function selectYear(res: Response, id: string): void {
+export function selectYear(res: Response, id: string): void {
   res.cookie(YEAR_COOKIE, id, {
     httpOnly: true,
     sameSite: "lax",
@@ -152,6 +165,7 @@ async function yearFilters(yearId: string): Promise<{
   main: FilterRow | null;
   strands: FilterRow[];
   groups: Array<{ group: FilterRow; options: FilterRow[] }>;
+  strandLabel: string;
 }> {
   const all = await filtersForYear(yearId);
   const main = all.find((row) => row.is_main && row.parent_id === null) ?? null;
@@ -159,7 +173,7 @@ async function yearFilters(yearId: string): Promise<{
   const groups = all
     .filter((row) => row.parent_id === null && !row.is_main)
     .map((group) => ({ group, options: all.filter((row) => row.parent_id === group.id) }));
-  return { all, main, strands, groups };
+  return { all, main, strands, groups, strandLabel: main?.name ?? "Strand" };
 }
 
 async function listed(yearId: string, today: string): Promise<Array<{ row: EventRow; state: ReturnType<typeof eventState>; photos: number }>> {
@@ -182,7 +196,10 @@ const NOTICES: Record<string, string> = {
   deleted: "Deleted.",
   created: "Year created. You are now editing it.",
   current: "That year is now on the site.",
+  "year-deleted": "Year deleted, with its events, photos and rhythm cards.",
   selected: "Now editing this year.",
+  theme: "Theme saved. It shows in the calendar hero on the website.",
+  "theme-invalid": "Theme not saved. Use 1 to 40 characters.",
 };
 
 function noticeFrom(req: Request): string {
@@ -282,10 +299,24 @@ async function saveEvent(existingId: string | null, year: YearRow, input: EventI
     // A recap stays public only while every rule still holds.
     if (recapPublished && (!input.photoConsent || status !== "published" || input.startDate > today)) recapPublished = false;
 
-    const slugLocked = Boolean(existing?.slug_locked) || status !== "draft";
-    const slug = existing?.slug_locked
-      ? existing.slug
-      : await uniqueSlug(client, year.id, slugBase(input.startDate, input.title), existing?.id ?? null);
+    // The pop-up link: the admin may type their own. Otherwise it follows the date and title
+    // until the first publish, then stays so shared links keep working.
+    let slug: string;
+    let slugLocked = Boolean(existing?.slug_locked) || status !== "draft";
+    if (input.slug && input.slug !== existing?.slug) {
+      const taken = await client.query("select 1 from cal_events where year_id = $1 and slug = $2 and id is distinct from $3", [
+        year.id,
+        input.slug,
+        existing?.id ?? null,
+      ]);
+      if (taken.rowCount) throw new Rejection("Another event this year already uses that pop-up link. Choose a different one.");
+      slug = input.slug;
+      slugLocked = true;
+    } else if (existing?.slug_locked || (existing && input.slug === existing.slug && existing.slug_locked)) {
+      slug = existing.slug;
+    } else {
+      slug = await uniqueSlug(client, year.id, slugBase(input.startDate, input.title), existing?.id ?? null);
+    }
 
     let movedFrom = existing?.moved_from ?? null;
     if (existing && existing.status === "published") {
@@ -313,6 +344,11 @@ async function saveEvent(existingId: string | null, year: YearRow, input: EventI
       photo_consent: input.photoConsent,
       seo_title: input.seoTitle || autoEventSeoTitle(input.title, year.theme_name),
       seo_description: input.seoDescription || autoEventSeoDescription(input.subtitle, input.body),
+      seo_keywords: input.seoKeywords,
+      seo_noindex: input.seoNoindex,
+      seo_canonical: input.seoCanonical,
+      seo_schema_type: input.seoSchemaType,
+      seo_schema_json: input.seoSchemaJson,
       status,
     };
     const event = existing ? await updateEvent(client, existing.id, row) : await insertEvent(client, row);
@@ -326,8 +362,9 @@ async function editorModel(
   values: EventInput,
   extra: Partial<Pick<EditorModel, "error" | "notice" | "tab">>,
 ): Promise<EditorModel> {
-  const { strands, groups } = await yearFilters(year.id);
+  const { strands, groups, strandLabel } = await yearFilters(year.id);
   return {
+    strandLabel,
     event,
     values,
     year,
@@ -382,7 +419,12 @@ export function mountCalendarAdmin(app: Express): void {
 
   app.get("/admin/calendar/events", requireAdmin, async (req, res, next) => {
     try {
-      const year = await workingYear(req);
+      const years = await listYears();
+      // The Year dropdown in the filter row switches the year being edited.
+      const askedYear = idParam(req.query.year);
+      const pickedYear = askedYear ? years.find((row) => row.id === askedYear) ?? null : null;
+      if (pickedYear) selectYear(res, pickedYear.id);
+      const year = pickedYear ?? (await workingYear(req));
       if (!year) {
         res.redirect("/admin/calendar");
         return;
@@ -391,13 +433,15 @@ export function mountCalendarAdmin(app: Express): void {
       const keys = monthKeys(year.first_month, year.last_month);
       const asked = typeof req.query.month === "string" && MONTH_KEY.test(req.query.month) ? req.query.month : "";
       const month = keys.includes(asked) ? asked : keys.includes(today.slice(0, 7)) ? today.slice(0, 7) : keys[0];
-      const strandFilter = idParam(req.query.strand) ?? "";
+      const askedStrand = idParam(req.query.strand) ?? "";
       const states = ["draft", "upcoming", "needs-photos", "completed", "cancelled"];
       const stateFilter = typeof req.query.state === "string" && states.includes(req.query.state) ? req.query.state : "";
       const search = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 80) : "";
       const words = search.toLowerCase().split(/\s+/).filter(Boolean);
-      const [all, { strands }] = await Promise.all([listed(year.id, today), yearFilters(year.id)]);
+      const [all, { strands, strandLabel }] = await Promise.all([listed(year.id, today), yearFilters(year.id)]);
       const strandName = new Map(strands.map((row) => [row.id, row.name]));
+      // Strands belong to one year: a strand from another year no longer filters.
+      const strandFilter = strandName.has(askedStrand) ? askedStrand : "";
       // Search looks through the whole school year: title, subtitle, grades, plan, recap and strand.
       const found = (item: (typeof all)[number]): boolean => {
         if (!words.length) return true;
@@ -414,7 +458,7 @@ export function mountCalendarAdmin(app: Express): void {
           (!stateFilter || item.state === stateFilter || (stateFilter === "upcoming" && item.state === "today")),
       );
       send(res, 200, "Events", "events", year, () =>
-        eventsBody(year, month, shown, all.filter(found), strands, { strand: strandFilter, state: stateFilter, q: search }, noticeFrom(req)),
+        eventsBody(year, month, shown, all.filter(found), strands, { strand: strandFilter, state: stateFilter, q: search }, noticeFrom(req), strandLabel, years),
       );
     } catch (error) {
       next(error);
@@ -433,7 +477,7 @@ export function mountCalendarAdmin(app: Express): void {
       const asked = typeof req.query.month === "string" && keys.includes(req.query.month) ? req.query.month : "";
       const start = asked ? (today.startsWith(asked) ? today : `${asked}-01`) : today >= year.first_month && today <= lastDayOfMonth(year.last_month) ? today : year.first_month;
       const model = await editorModel(year, null, blankValues(start), {});
-      send(res, 200, "New event", "events", year, () => editorBody(model), EDITOR_SCRIPT);
+      send(res, 200, "New event", "events", year, () => editorBody(model), EDITOR_SCRIPT + EVENT_SEO_SCRIPT);
     } catch (error) {
       next(error);
     }
@@ -460,7 +504,7 @@ export function mountCalendarAdmin(app: Express): void {
       const fresh = existing ? await eventById(existing.id) : null;
       const tab = input.intent.startsWith("recap") ? "after" : "plan";
       const model = await editorModel(year, fresh, input, { error: message, tab });
-      send(res, error instanceof Rejection ? error.status : 409, existing ? "Edit event" : "New event", "events", year, () => editorBody(model), EDITOR_SCRIPT);
+      send(res, error instanceof Rejection ? error.status : 409, existing ? "Edit event" : "New event", "events", year, () => editorBody(model), EDITOR_SCRIPT + EVENT_SEO_SCRIPT);
     }
   };
 
@@ -483,7 +527,7 @@ export function mountCalendarAdmin(app: Express): void {
       }
       const tab = req.query.tab === "after" || req.query.tab === "seo" ? req.query.tab : "plan";
       const model = await editorModel(year, event, editorValuesFromRow(event), { notice: noticeFrom(req), tab });
-      send(res, 200, "Edit event", "events", year, () => editorBody(model), EDITOR_SCRIPT);
+      send(res, 200, "Edit event", "events", year, () => editorBody(model), EDITOR_SCRIPT + EVENT_SEO_SCRIPT);
     } catch (error) {
       next(error);
     }
@@ -699,7 +743,7 @@ export function mountCalendarAdmin(app: Express): void {
   // ---- Filters ----
 
   const filtersPage = async (req: Request, res: Response, year: YearRow, error: string, status = 200): Promise<void> => {
-    const { all, groups, main } = await yearFilters(year.id);
+    const { all, main } = await yearFilters(year.id);
     const events = await eventsForYear(year.id);
     const rhythm = await rhythmForYear(year.id);
     const usage = new Map<string, number>();
@@ -711,11 +755,11 @@ export function mountCalendarAdmin(app: Express): void {
       event.option_ids.forEach(bump);
     }
     for (const card of rhythm) bump(card.strand_id);
+    // Strand only: other groups were removed and can't be added any more.
     const ordered = [
       ...(main ? [{ group: main, options: all.filter((row) => row.parent_id === main.id) }] : []),
-      ...groups,
     ];
-    send(res, status, "Filters", "filters", year, () => filtersBody(ordered, usage, error, error ? "" : noticeFrom(req)));
+    send(res, status, "Strands", "filters", year, () => filtersBody(ordered, usage, error, error ? "" : noticeFrom(req)));
   };
 
   app.get("/admin/calendar/filters", requireAdmin, async (req, res, next) => {
@@ -744,29 +788,10 @@ export function mountCalendarAdmin(app: Express): void {
     return (COLOR_KEYS as readonly string[]).includes(value) ? (value as ColorKey) : null;
   };
 
-  app.post("/admin/calendar/filters/groups", requireAdmin, async (req, res, next) => {
-    try {
-      const year = await workingYear(req);
-      if (!year) {
-        res.redirect("/admin/calendar");
-        return;
-      }
-      const name = filterNameSchema.safeParse(formText(req.body, "name"));
-      if (!name.success) {
-        await filtersPage(req, res, year, firstIssue(name.error), 400);
-        return;
-      }
-      try {
-        await insertFilter({ yearId: year.id, parentId: null, name: name.data, colorKey: null, showOnSite: false });
-      } catch (error) {
-        if (!isUnique(error)) throw error;
-        await filtersPage(req, res, year, CAL_COPY.nameTaken, 409);
-        return;
-      }
-      res.redirect("/admin/calendar/filters?notice=saved");
-    } catch (error) {
-      next(error);
-    }
+  // New groups are no longer added from the CMS: the Strand group (and any group that
+  // already exists) is managed in place. Old links answer with the Filters page.
+  app.post("/admin/calendar/filters/groups", requireAdmin, (_req, res) => {
+    res.redirect("/admin/calendar/filters");
   });
 
   app.post("/admin/calendar/filters/:id/options", requireAdmin, async (req, res, next) => {
@@ -832,7 +857,7 @@ export function mountCalendarAdmin(app: Express): void {
         await filtersPage(req, res, year, CAL_COPY.nameTaken, 409);
         return;
       }
-      res.redirect("/admin/calendar/filters?notice=saved");
+      res.redirect(`/admin/calendar/filters?notice=saved#opt-${row.id}`);
     } catch (error) {
       next(error);
     }
@@ -843,7 +868,7 @@ export function mountCalendarAdmin(app: Express): void {
       const found = await filterInYear(req);
       const dir = formText(req.body, "dir");
       if (found && !found.row.is_main && (dir === "up" || dir === "down")) await moveRow("cal_filters", found.row.id, dir);
-      res.redirect("/admin/calendar/filters");
+      res.redirect(found ? `/admin/calendar/filters#opt-${found.row.id}` : "/admin/calendar/filters");
     } catch (error) {
       next(error);
     }
@@ -878,10 +903,34 @@ export function mountCalendarAdmin(app: Express): void {
 
   // ---- Rhythm ----
 
-  const rhythmPage = async (req: Request, res: Response, year: YearRow, error: string, status = 200): Promise<void> => {
-    const [cards, { strands }] = await Promise.all([rhythmForYear(year.id), yearFilters(year.id)]);
-    send(res, status, "All-year rhythm", "rhythm", year, () => rhythmBody(cards, strands, error, error ? "" : noticeFrom(req)), UPLOAD_SCRIPT);
+  const rhythmPage = async (
+    req: Request,
+    res: Response,
+    year: YearRow,
+    error: string,
+    status = 200,
+    open = "",
+    draft?: Record<string, string>,
+  ): Promise<void> => {
+    const [cards, { strands, strandLabel }] = await Promise.all([rhythmForYear(year.id), yearFilters(year.id)]);
+    send(
+      res,
+      status,
+      "All-year rhythm",
+      "rhythm",
+      year,
+      () => rhythmBody(cards, strands, error, error ? "" : noticeFrom(req), strandLabel, open, draft),
+      UPLOAD_SCRIPT + RHYTHM_SCRIPT,
+    );
   };
+  const rhythmDraft = (req: Request): Record<string, string> => ({
+    strandId: formText(req.body, "strandId"),
+    whenLabel: formText(req.body, "whenLabel"),
+    title: formText(req.body, "title"),
+    body: formText(req.body, "body"),
+    caption: formText(req.body, "caption"),
+    photoAlt: formText(req.body, "photoAlt"),
+  });
 
   const rhythmValues = async (req: Request, year: YearRow): Promise<{ ok: true; value: ReturnType<typeof rhythmSchema.parse> } | { ok: false; error: string }> => {
     const parsed = rhythmSchema.safeParse({
@@ -928,11 +977,11 @@ export function mountCalendarAdmin(app: Express): void {
       }
       const values = await rhythmValues(req, year);
       if (!values.ok) {
-        await rhythmPage(req, res, year, values.error, 400);
+        await rhythmPage(req, res, year, values.error, 400, "new", rhythmDraft(req));
         return;
       }
-      await insertRhythm(year.id, values.value);
-      res.redirect("/admin/calendar/rhythm?notice=saved");
+      const id = await insertRhythm(year.id, values.value);
+      res.redirect(`/admin/calendar/rhythm?notice=saved${typeof id === "string" ? `#r-${id}` : ""}`);
     } catch (error) {
       next(error);
     }
@@ -947,11 +996,11 @@ export function mountCalendarAdmin(app: Express): void {
       }
       const values = await rhythmValues(req, found.year);
       if (!values.ok) {
-        await rhythmPage(req, res, found.year, values.error, 400);
+        await rhythmPage(req, res, found.year, values.error, 400, found.id);
         return;
       }
       await updateRhythm(found.id, { ...values.value, active: formTick(req.body, "active") });
-      res.redirect("/admin/calendar/rhythm?notice=saved");
+      res.redirect(`/admin/calendar/rhythm?notice=saved#r-${found.id}`);
     } catch (error) {
       next(error);
     }
@@ -962,7 +1011,7 @@ export function mountCalendarAdmin(app: Express): void {
       const found = await rhythmInYear(req);
       const dir = formText(req.body, "dir");
       if (found && (dir === "up" || dir === "down")) await moveRow("cal_rhythm", found.id, dir);
-      res.redirect("/admin/calendar/rhythm");
+      res.redirect(found ? `/admin/calendar/rhythm#r-${found.id}` : "/admin/calendar/rhythm");
     } catch (error) {
       next(error);
     }
@@ -982,7 +1031,7 @@ export function mountCalendarAdmin(app: Express): void {
     try {
       const found = await rhythmInYear(req);
       if (found) await removeUnreferenced([await setRhythmPhoto(found.id, null)]);
-      res.redirect("/admin/calendar/rhythm?notice=saved");
+      res.redirect(found ? `/admin/calendar/rhythm?notice=saved#r-${found.id}` : "/admin/calendar/rhythm");
     } catch (error) {
       next(error);
     }
@@ -1015,7 +1064,8 @@ export function mountCalendarAdmin(app: Express): void {
         res.redirect("/admin/calendar");
         return;
       }
-      send(res, 200, "Page & SEO", "settings", year, () => settingsBody(year, "", noticeFrom(req)), UPLOAD_SCRIPT + COUNTER_SCRIPT);
+      // The theme now lives under Site & SEO · Calendar (and can be renamed on the dashboard).
+      res.redirect("/admin/site?page=calendar#theme");
     } catch (error) {
       next(error);
     }
@@ -1028,26 +1078,14 @@ export function mountCalendarAdmin(app: Express): void {
         res.redirect("/admin/calendar");
         return;
       }
-      const raw = {
-        themeName: formText(req.body, "themeName"),
-        label: formText(req.body, "label"),
-        seoTitle: formText(req.body, "seoTitle"),
-        seoDescription: formText(req.body, "seoDescription"),
-        shareImageAlt: formText(req.body, "shareImageAlt"),
-      };
-      const parsed = settingsSchema.safeParse(raw);
+      // "Rename theme" on the calendar dashboard.
+      const parsed = themeSchema.safeParse({ themeName: formText(req.body, "themeName") });
       if (!parsed.success) {
-        send(res, 400, "Page & SEO", "settings", year, () => settingsBody(year, firstIssue(parsed.error), "", raw), UPLOAD_SCRIPT + COUNTER_SCRIPT);
+        res.redirect("/admin/calendar?notice=theme-invalid");
         return;
       }
-      try {
-        await updateYearSettings(year.id, parsed.data);
-      } catch (error) {
-        if (!isUnique(error)) throw error;
-        send(res, 409, "Page & SEO", "settings", year, () => settingsBody(year, CAL_COPY.labelTaken, "", raw), UPLOAD_SCRIPT + COUNTER_SCRIPT);
-        return;
-      }
-      res.redirect("/admin/calendar/settings?notice=saved");
+      await updateYearTheme(year.id, parsed.data.themeName);
+      res.redirect("/admin/calendar?notice=theme");
     } catch (error) {
       next(error);
     }
@@ -1083,10 +1121,29 @@ export function mountCalendarAdmin(app: Express): void {
 
   // ---- Years ----
 
+  const yearsPage = async (
+    req: Request,
+    res: Response,
+    error: string,
+    status = 200,
+    options: Parameters<typeof yearsBody>[4] = {},
+  ): Promise<void> => {
+    const [years, working] = await Promise.all([listYears(), workingYear(req)]);
+    const usage = new Map(await Promise.all(years.map(async (year) => [year.id, await yearUsage(year.id)] as const)));
+    send(
+      res,
+      status,
+      "Years",
+      "years",
+      working,
+      () => yearsBody(years, working, error, error ? "" : noticeFrom(req), { ...options, usage }),
+      YEARS_SCRIPT,
+    );
+  };
+
   app.get("/admin/calendar/years", requireAdmin, async (req, res, next) => {
     try {
-      const [years, working] = await Promise.all([listYears(), workingYear(req)]);
-      send(res, 200, "Years", "years", working, () => yearsBody(years, working, "", noticeFrom(req)));
+      await yearsPage(req, res, "");
     } catch (error) {
       next(error);
     }
@@ -1095,27 +1152,124 @@ export function mountCalendarAdmin(app: Express): void {
   app.post("/admin/calendar/years", requireAdmin, async (req, res, next) => {
     try {
       const working = await workingYear(req);
-      const parsed = yearSchema.safeParse({
-        label: formText(req.body, "label"),
-        themeName: formText(req.body, "themeName"),
-        firstMonth: formText(req.body, "firstMonth"),
+      const draft = {
+        startYear: formText(req.body, "startYear"),
+        endYear: formText(req.body, "endYear"),
+        startMonth: formText(req.body, "startMonth"),
         lastMonth: formText(req.body, "lastMonth"),
+        themeName: formText(req.body, "themeName"),
+      };
+      const span = yearSpan(draft.startYear, draft.endYear, draft.startMonth, draft.lastMonth);
+      const theme = newYearThemeSchema.safeParse(draft.themeName);
+      if (!span.ok || !theme.success) {
+        await yearsPage(req, res, !span.ok ? span.error : firstIssue((theme as { error: import("zod").ZodError }).error), 400, { draft });
+        return;
+      }
+      const overlap = (await listYears()).find((year) => {
+        const first = year.first_month.slice(0, 7);
+        const last = year.last_month.slice(0, 7);
+        return span.firstMonth <= last && span.lastMonth >= first;
       });
-      if (!parsed.success) {
-        const years = await listYears();
-        send(res, 400, "Years", "years", working, () => yearsBody(years, working, firstIssue(parsed.error), ""));
+      if (overlap) {
+        await yearsPage(req, res, `These months overlap ${overlap.label}. Start the new year after ${monthName(overlap.last_month)}.`, 409, { draft });
         return;
       }
       try {
-        const id = await createYearFrom(working?.id ?? null, parsed.data);
+        const id = await createYearFrom(working?.id ?? null, {
+          label: span.label,
+          themeName: theme.data,
+          firstMonth: span.firstMonth,
+          lastMonth: span.lastMonth,
+        });
         selectYear(res, id);
       } catch (error) {
         if (!isUnique(error)) throw error;
-        const years = await listYears();
-        send(res, 409, "Years", "years", working, () => yearsBody(years, working, CAL_COPY.labelTaken, ""));
+        await yearsPage(req, res, CAL_COPY.labelTaken, 409, { draft });
         return;
       }
       res.redirect("/admin/calendar/years?notice=created");
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/admin/calendar/years/:id/span", requireAdmin, async (req, res, next) => {
+    try {
+      const id = idParam(req.params.id);
+      const year = id ? await yearById(id) : null;
+      if (!year) {
+        res.redirect("/admin/calendar/years");
+        return;
+      }
+      const editDraft = {
+        startYear: formText(req.body, "startYear"),
+        endYear: formText(req.body, "endYear"),
+        startMonth: formText(req.body, "startMonth"),
+        lastMonth: formText(req.body, "lastMonth"),
+        themeName: year.theme_name,
+      };
+      const span = yearSpan(editDraft.startYear, editDraft.endYear, editDraft.startMonth, editDraft.lastMonth);
+      if (!span.ok) {
+        await yearsPage(req, res, span.error, 400, { editId: year.id, editDraft });
+        return;
+      }
+      const overlap = (await listYears()).find((other) => {
+        if (other.id === year.id) return false;
+        return span.firstMonth <= other.last_month.slice(0, 7) && span.lastMonth >= other.first_month.slice(0, 7);
+      });
+      if (overlap) {
+        await yearsPage(req, res, `These months overlap ${overlap.label}.`, 409, { editId: year.id, editDraft });
+        return;
+      }
+      const outside = await eventsOutside(year.id, `${span.firstMonth}-01`, `${span.lastMonth}-01`);
+      if (outside > 0) {
+        await yearsPage(
+          req,
+          res,
+          `${outside} event${outside === 1 ? " falls" : "s fall"} outside ${monthName(`${span.firstMonth}-01`)} – ${monthName(`${span.lastMonth}-01`)}. Move ${outside === 1 ? "it" : "them"} first.`,
+          409,
+          { editId: year.id, editDraft },
+        );
+        return;
+      }
+      try {
+        await updateYearSpan(year.id, span);
+      } catch (error) {
+        if (!isUnique(error)) throw error;
+        await yearsPage(req, res, CAL_COPY.labelTaken, 409, { editId: year.id, editDraft });
+        return;
+      }
+      res.redirect("/admin/calendar/years?notice=saved");
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/admin/calendar/years/:id/delete", requireAdmin, async (req, res, next) => {
+    try {
+      const id = idParam(req.params.id);
+      const year = id ? await yearById(id) : null;
+      if (!year) {
+        res.redirect("/admin/calendar/years");
+        return;
+      }
+      // The admin types the label to confirm, so a stray click can't remove a year.
+      if (formText(req.body, "confirmLabel") !== year.label) {
+        await yearsPage(req, res, `To delete ${year.label}, type its label exactly: ${year.label}`, 400, { deleteId: year.id });
+        return;
+      }
+      const result = await deleteYear(year.id);
+      if (!result.ok) {
+        await yearsPage(
+          req,
+          res,
+          result.reason === "current" ? `${year.label} is on the site. Make another year current first, then delete this one.` : CAL_COPY.notFound,
+          409,
+        );
+        return;
+      }
+      await removeUnreferenced(result.paths);
+      res.redirect("/admin/calendar/years?notice=year-deleted");
     } catch (error) {
       next(error);
     }

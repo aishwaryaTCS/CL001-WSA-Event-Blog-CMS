@@ -11,6 +11,7 @@ types.setTypeParser(1082, (value: string) => value);
 
 export type NoteRow = {
   id: string;
+  uid: string;
   title: string;
   slug: string | null;
   excerpt: string;
@@ -36,6 +37,11 @@ export type NoteRow = {
   name_consent: boolean;
   seo_title: string | null;
   seo_description: string | null;
+  seo_keywords: string;
+  seo_canonical: string;
+  seo_noindex: boolean;
+  seo_schema_type: string;
+  seo_schema_json: string;
   slug_locked: boolean;
   created_at: Date;
   updated_at: Date;
@@ -152,19 +158,20 @@ export async function seedNotes(): Promise<void> {
 }
 
 const NOTE_COLUMNS = `
-  id, title, slug, excerpt, body, pillar, date_label, author,
+  id, uid, title, slug, excerpt, body, pillar, date_label, author,
   author_title, author_first_name, author_last_name, author_designation, author_grade,
   cover_image, cover_width, cover_height, image_alt, caption,
   publish_date, status, featured, includes_student, photo_consent, name_consent,
-  seo_title, seo_description, slug_locked, created_at, updated_at
+  seo_title, seo_description, seo_keywords, seo_canonical, seo_noindex, seo_schema_type, seo_schema_json,
+  slug_locked, created_at, updated_at
 `;
 
 const LIST_COLUMNS = `
-  id, title, slug, excerpt, pillar, date_label, author,
+  id, uid, title, slug, excerpt, pillar, date_label, author,
   cover_image, cover_width, cover_height, image_alt,
   publish_date, status, featured, created_at, updated_at,
   body, caption, includes_student, photo_consent, name_consent,
-  seo_title, seo_description, slug_locked,
+  seo_title, seo_description, seo_keywords, seo_canonical, seo_noindex, seo_schema_type, seo_schema_json, slug_locked,
   author_title, author_first_name, author_last_name, author_designation, author_grade
 `;
 
@@ -240,12 +247,17 @@ export async function saveNote(
       input.seoTitle,
       input.seoDescription,
       input.authorTitle,
+      input.seoKeywords,
+      input.seoCanonical,
+      input.seoNoindex,
+      input.seoSchemaType,
+      input.seoSchemaJson,
     ];
     const result = id
       ? await client.query(
           `update blog_posts set
              title = $1,
-             slug = case when slug_locked then slug else $2 end,
+             slug = $2,
              excerpt = $3,
              body = $4,
              pillar = $5,
@@ -269,9 +281,14 @@ export async function saveNote(
              seo_title = $23,
              seo_description = $24,
              author_title = $25,
+             seo_keywords = $26,
+             seo_canonical = $27,
+             seo_noindex = $28,
+             seo_schema_type = $29,
+             seo_schema_json = $30,
              slug_locked = slug_locked or $18 = 'published',
              updated_at = now()
-           where id = $26
+           where id = $31
            returning ${NOTE_COLUMNS}`,
           [...params, id],
         )
@@ -281,13 +298,15 @@ export async function saveNote(
              author_first_name, author_last_name, author_designation, author_grade,
              cover_image, cover_width, cover_height, image_alt, caption,
              publish_date, status, featured, includes_student, photo_consent, name_consent,
-             seo_title, seo_description, slug_locked, author_title
+             seo_title, seo_description, slug_locked, author_title,
+             seo_keywords, seo_canonical, seo_noindex, seo_schema_type, seo_schema_json
            ) values (
              $1, $2, $3, $4, $5, $6, $7,
              $8, $9, $10, $11,
              $12, $13, $14, $15, $16,
              $17, $18, $19, $20, $21, $22,
-             $23, $24, $18 = 'published', $25
+             $23, $24, $18 = 'published', $25,
+             $26, $27, $28, $29, $30
            )
            returning ${NOTE_COLUMNS}`,
           params,
@@ -338,6 +357,7 @@ function mapNote(row: pg.QueryResultRow): NoteRow {
   const grade = row.author_grade == null ? null : Number(row.author_grade);
   return {
     id: String(row.id),
+    uid: String(row.uid ?? ""),
     title: String(row.title),
     slug: row.slug ? String(row.slug) : null,
     excerpt: String(row.excerpt ?? ""),
@@ -363,6 +383,11 @@ function mapNote(row: pg.QueryResultRow): NoteRow {
     name_consent: row.name_consent === true,
     seo_title: row.seo_title ? String(row.seo_title) : null,
     seo_description: row.seo_description ? String(row.seo_description) : null,
+    seo_keywords: String(row.seo_keywords ?? ""),
+    seo_canonical: String(row.seo_canonical ?? ""),
+    seo_noindex: row.seo_noindex === true,
+    seo_schema_type: String(row.seo_schema_type ?? ""),
+    seo_schema_json: String(row.seo_schema_json ?? ""),
     slug_locked: row.slug_locked === true,
     created_at: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
     updated_at: row.updated_at instanceof Date ? row.updated_at : new Date(String(row.updated_at)),

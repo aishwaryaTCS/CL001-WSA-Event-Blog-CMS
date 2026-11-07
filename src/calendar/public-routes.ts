@@ -4,6 +4,7 @@ import {
   filtersForYear,
   photosForEvents,
   publicEvents,
+  publicYears,
   rhythmForYear,
   type FilterRow,
   type YearRow,
@@ -11,7 +12,7 @@ import {
 import { fileFor } from "./photos.ts";
 import { CAL_COPY, PHOTO_NAME, eventState, kolkataToday, monthKeys } from "./schemas.ts";
 
-export async function publicCalendar(year: YearRow): Promise<Record<string, unknown>> {
+export async function publicCalendar(year: YearRow, years: YearRow[] = []): Promise<Record<string, unknown>> {
   const today = kolkataToday();
   const [filters, events, rhythm] = await Promise.all([
     filtersForYear(year.id),
@@ -46,7 +47,20 @@ export async function publicCalendar(year: YearRow): Promise<Record<string, unkn
       seoDescription: year.seo_description,
       shareImage: year.share_image,
       shareImageAlt: year.share_image_alt,
+      keywords: year.seo_keywords,
+      canonical: year.seo_canonical,
+      robots: year.seo_noindex ? "noindex, nofollow" : "index, follow",
+      author: year.seo_author || "Wellsprings Academy",
+      schemaType: year.seo_schema_type,
+      schemaJson: year.seo_schema_json,
+      current: year.is_current,
+      firstMonth: year.first_month.slice(0, 7),
+      lastMonth: year.last_month.slice(0, 7),
     },
+    // Years parents can switch between: the one on the site and earlier years with events.
+    years: years.map((row) => ({ label: row.label, theme: row.theme_name, current: row.is_current })),
+    // The main filter group's name, as the admin last saved it (for "Filter by …").
+    strandLabel: main?.name ?? "Strand",
     today,
     months: monthKeys(year.first_month, year.last_month).map((key) => ({ key, line: year.month_lines[key] ?? "" })),
     strands: strandOptions
@@ -57,7 +71,8 @@ export async function publicCalendar(year: YearRow): Promise<Record<string, unkn
       const showRecap = row.status === "published" && row.recap_published;
       const strand = strandOf(row.strand_id);
       return {
-        slug: row.slug,
+        // Pop-up link: the unique id goes before the title, so two events never share a URL.
+        slug: `${row.uid}-${row.slug}`,
         title: row.title,
         subtitle: row.subtitle,
         start: row.start_date,
@@ -73,6 +88,11 @@ export async function publicCalendar(year: YearRow): Promise<Record<string, unkn
         state: eventState(row, today),
         seoTitle: row.seo_title,
         seoDescription: row.seo_description,
+        seoKeywords: row.seo_keywords,
+        seoRobots: row.seo_noindex ? "noindex, nofollow" : "index, follow",
+        seoCanonical: row.seo_canonical,
+        seoSchemaType: row.seo_schema_type,
+        seoSchemaJson: row.seo_schema_json,
         recap: showRecap ? row.recap : "",
         photos: showRecap
           ? (photos.get(row.id) ?? []).map((photo) => ({
@@ -106,16 +126,19 @@ export async function publicCalendar(year: YearRow): Promise<Record<string, unkn
 }
 
 export function mountCalendarPublic(app: Express): void {
-  app.get("/api/calendar", async (_req, res, next) => {
+  app.get("/api/calendar", async (req, res, next) => {
     try {
-      const year = await currentYear();
+      const years = await publicYears();
+      const asked = typeof req.query.year === "string" ? req.query.year.trim().slice(0, 20) : "";
+      // Only years in the public list can be opened: never a future or empty year.
+      const year = asked ? years.find((row) => row.label === asked) ?? null : (years.find((row) => row.is_current) ?? (await currentYear()));
       if (!year) {
         res.status(404).json({ error: CAL_COPY.notFound });
         return;
       }
       // no-cache + Express's default ETag: a repeat request with nothing changed gets a 304.
       res.setHeader("Cache-Control", "no-cache");
-      res.json(await publicCalendar(year));
+      res.json(await publicCalendar(year, years));
     } catch (error) {
       next(error);
     }

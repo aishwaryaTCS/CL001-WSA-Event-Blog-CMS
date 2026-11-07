@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { kolkataToday } from "../schemas.ts";
+import { canonicalProblem, normaliseKeywords, readSeoExtras } from "../seo-fields.ts";
 
 export { kolkataToday };
 
@@ -178,6 +179,16 @@ export type EventInput = {
   showMoved: boolean;
   seoTitle: string;
   seoDescription: string;
+  seoKeywords: string;
+  seoNoindex: boolean;
+  /** The pop-up link's last part (?event=…). Empty = made from the date and title. */
+  slug: string;
+  seoCanonical: string;
+  seoSchemaType: string;
+  /** "" = automatic markup. */
+  seoSchemaJson: string;
+  /** Set when the custom JSON-LD did not pass the checks. */
+  seoSchemaProblem: string;
   intent: EventIntent;
 };
 
@@ -187,6 +198,7 @@ export function eventFormValues(body: unknown): EventInput {
   const intentRaw = text(source.intent);
   const intent = (EVENT_INTENTS as string[]).includes(intentRaw) ? (intentRaw as EventIntent) : "save";
   const endDate = text(source.endDate).trim();
+  const extras = readSeoExtras(source, { canonical: true, author: false, kind: "event" });
   return {
     title: text(source.title).trim(),
     subtitle: text(source.subtitle).trim(),
@@ -205,6 +217,13 @@ export function eventFormValues(body: unknown): EventInput {
     showMoved: tick(source.showMoved),
     seoTitle: text(source.seoTitle).trim(),
     seoDescription: text(source.seoDescription).trim(),
+    seoKeywords: normaliseKeywords(text(source.seoKeywords)),
+    seoNoindex: tick(source.seoHidden),
+    slug: text(source.slug).trim().toLowerCase(),
+    seoCanonical: text(source.seoCanonical).trim(),
+    seoSchemaType: extras.value.schemaType,
+    seoSchemaJson: text(source.seoSchemaMode) === "custom" ? (extras.ok ? extras.value.schemaJson : text(source.seoSchemaJson)) : "",
+    seoSchemaProblem: extras.ok ? "" : extras.error,
     intent,
   };
 }
@@ -226,6 +245,16 @@ export function eventShapeProblem(input: EventInput): string | null {
   if (input.recap.length > 600) return "Recap must be 600 characters or fewer.";
   if (input.seoTitle.length > 200) return "Search title must be 200 characters or fewer.";
   if (input.seoDescription.length > 300) return "Search description must be 300 characters or fewer.";
+  const keywords = input.seoKeywords ? input.seoKeywords.split(", ") : [];
+  if (keywords.length > 10) return "Use at most 10 keywords.";
+  if (keywords.some((word) => word.length > 40)) return "Each keyword must be 40 characters or fewer.";
+  if (input.seoKeywords.length > 200) return "Keywords must be 200 characters or fewer in total.";
+  if (input.slug && (input.slug.length > 100 || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(input.slug))) {
+    return "The pop-up link can use only small letters, numbers and single hyphens, such as 2026-06-12-sports-day.";
+  }
+  const canonical = canonicalProblem(input.seoCanonical);
+  if (canonical) return canonical;
+  if (input.seoSchemaProblem) return input.seoSchemaProblem;
   return null;
 }
 
@@ -256,9 +285,11 @@ export function formTick(body: unknown, key: string): boolean {
   return tick(source[key]);
 }
 
-export const settingsSchema = z.object({
+export const themeSchema = z.object({
   themeName: z.string().trim().min(1, "Add the theme name.").max(40, "Theme name must be 40 characters or fewer."),
-  label: z.string().trim().min(1, "Add the year label.").max(20, "Year label must be 20 characters or fewer."),
+});
+
+export const calendarSeoSchema = z.object({
   seoTitle: z.string().trim().min(1, "Add a search title.").max(200, "Search title must be 200 characters or fewer."),
   seoDescription: z
     .string()
@@ -268,17 +299,46 @@ export const settingsSchema = z.object({
   shareImageAlt: z.string().trim().max(160, "Share image alt text must be 160 characters or fewer."),
 });
 
-export const yearSchema = z
-  .object({
-    label: z.string().trim().min(1, "Add the year label.").max(20, "Year label must be 20 characters or fewer."),
-    themeName: z.string().trim().min(1, "Add the theme name.").max(40, "Theme name must be 40 characters or fewer."),
-    firstMonth: z.string().regex(MONTH_KEY, "Choose the first month."),
-    lastMonth: z.string().regex(MONTH_KEY, "Choose the last month."),
-  })
-  .refine((value) => value.lastMonth >= value.firstMonth, { message: "The last month must be after the first." })
-  .refine((value) => monthKeys(`${value.firstMonth}-01`, `${value.lastMonth}-01`).length <= 24, {
-    message: "A year can have at most 24 months.",
-  });
+export const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"] as const;
+
+/**
+ * A school year: the admin picks the start year and the end year (filled in as the next year,
+ * but editable), the first month (in the start year) and the last month (any month after it,
+ * up to December of the end year). Not limited to 12 months: 2027 + April + Nov 2028 -> Apr 2027 to Nov 2028.
+ * The label follows: "2027–28".
+ */
+export function yearSpan(
+  startYearRaw: string,
+  endYearRaw: string,
+  startMonthRaw: string,
+  lastMonthRaw: string,
+): { ok: true; label: string; firstMonth: string; lastMonth: string } | { ok: false; error: string } {
+  const startYear = Number(startYearRaw);
+  if (!Number.isInteger(startYear) || startYear < 2000 || startYear > 2098) return { ok: false, error: "Choose the start year." };
+  const endYear = Number(endYearRaw);
+  if (!Number.isInteger(endYear) || endYear < startYear || endYear > startYear + 5) {
+    return { ok: false, error: "Choose an end year from the start year up to 5 years after it." };
+  }
+  const startMonth = Number(startMonthRaw);
+  if (!Number.isInteger(startMonth) || startMonth < 1 || startMonth > 12) return { ok: false, error: "Choose the month the year starts in." };
+  const last = /^(\d{4})-(\d{2})$/.exec(lastMonthRaw.trim());
+  const lastYear = last ? Number(last[1]) : 0;
+  const lastMonthNo = last ? Number(last[2]) : 0;
+  if (!last || lastMonthNo < 1 || lastMonthNo > 12 || lastYear < startYear || lastYear > endYear) {
+    return { ok: false, error: `Choose the last month, up to December ${endYear}.` };
+  }
+  const firstMonth = `${startYear}-${String(startMonth).padStart(2, "0")}`;
+  const lastMonth = `${lastYear}-${String(lastMonthNo).padStart(2, "0")}`;
+  if (lastMonth < firstMonth) return { ok: false, error: "The last month must come after the first month." };
+  const label = endYear === startYear ? String(startYear) : `${startYear}–${String(endYear % 100).padStart(2, "0")}`;
+  return { ok: true, label, firstMonth, lastMonth };
+}
+
+export const newYearThemeSchema = z
+  .string()
+  .trim()
+  .min(1, "Add the theme name.")
+  .max(40, "Theme name must be 40 characters or fewer.");
 
 export const filterNameSchema = z
   .string()

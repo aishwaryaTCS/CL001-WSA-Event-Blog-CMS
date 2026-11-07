@@ -24,7 +24,35 @@ import {
   type Salutation,
 } from "./schemas.ts";
 
+import { absolute, keywordList, SCHOOL_NAME, schemaTypeOf, SEO_EXTRAS_SCRIPT, seoExtrasHtml } from "./seo-fields.ts";
+
 const css = readFileSync(new URL("./admin.css", import.meta.url), "utf8");
+
+/** "<uid>-<slug>": the unique id (given on first save, never edited) goes before the title. */
+function notePath(form: EditorForm): string {
+  const slug = form.slug || slugify(form.title) || "your-note";
+  return form.uid ? `${form.uid}-${slug}` : slug;
+}
+
+/** The BlogPosting markup the website adds to a note page (shown read-only in the editor). */
+function noteJsonLd(form: EditorForm, title: string, description: string, cover: string): Record<string, unknown> {
+  const url = absolute(`/blog/${notePath(form)}`);
+  const data: Record<string, unknown> = {
+    "@context": "https://schema.org",
+    "@type": schemaTypeOf("note", form.seoSchemaType),
+    headline: form.title || title,
+    description,
+    url,
+    mainEntityOfPage: form.seoCanonical || url,
+    datePublished: form.publishDate,
+    author: { "@type": "Person", name: form.author || "Wellsprings teacher" },
+    publisher: { "@type": "EducationalOrganization", name: SCHOOL_NAME, url: absolute("/") },
+  };
+  if (cover) data.image = `${cover}`;
+  const keywords = keywordList(form.seoKeywords);
+  if (keywords.length) data.keywords = keywords.join(", ");
+  return data;
+}
 
 export function csp(nonce: string): string {
   return [
@@ -50,9 +78,241 @@ export function eyebrow(text: string, tone = ""): string {
   return `<p class="eyebrow${tone ? ` ${tone}` : ""}"><span class="rule" aria-hidden="true"></span>${esc(text)}</p>`;
 }
 
+/**
+ * After a form is sent, the page comes back at the same scroll position instead of the top
+ * (saves, year switches, moving cards up and down). Only when the answer is the same screen,
+ * and only for a few seconds, so following a link elsewhere still starts at the top.
+ */
+const KEEP_SCROLL_SCRIPT = `
+(function () {
+  var KEY = "wsa-keep-scroll";
+  try {
+    var saved = JSON.parse(window.sessionStorage.getItem(KEY) || "null");
+    window.sessionStorage.removeItem(KEY);
+    var fresh = saved && Date.now() - saved.t < 15000 && saved.path === window.location.pathname;
+    var hasError = document.querySelector(".banner.error, #form-status.error");
+    if (fresh && !hasError) {
+      if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+      window.scrollTo(0, saved.y);
+      window.__wsaScrollRestored = true;
+    }
+  } catch (error) { /* storage blocked: normal page load */ }
+  document.addEventListener("submit", function (event) {
+    if (event.defaultPrevented) return;
+    var form = event.target;
+    if (!form || (form.method || "get").toLowerCase() !== "post") return;
+    try { window.sessionStorage.setItem(KEY, JSON.stringify({ path: window.location.pathname, y: window.scrollY, t: Date.now() })); } catch (error) { /* ignore */ }
+  });
+})();
+`;
+
+const REQ_MARK = `<span class="req" aria-hidden="true">*</span>`;
+
+/**
+ * Marks mandatory fields: every label that belongs to a field with the `required` attribute
+ * gets a * after its text (before any grey "(optional note)"). Fields that are only checked
+ * on publish carry the * in their template instead. Search boxes are left alone.
+ */
+function markRequired(html: string): string {
+  const ids = new Set<string>();
+  for (const match of html.matchAll(/<(?:input|select|textarea)\b[^>]*>/g)) {
+    const tag = match[0];
+    if (!/\srequired(?=[\s>=])/.test(tag) || /type="(?:search|radio|checkbox|hidden)"/.test(tag)) continue;
+    const id = tag.match(/\sid="([^"]+)"/);
+    if (id) ids.add(id[1]);
+  }
+  if (!ids.size) return html;
+  return html.replace(/<label for="([^"]+)"([^>]*)>([\s\S]*?)<\/label>/g, (whole, id: string, attrs: string, inner: string) => {
+    if (!ids.has(id) || inner.includes('class="req"') || /class="[^"]*\bcheck\b/.test(attrs)) return whole;
+    const note = inner.indexOf(' <span class="muted"');
+    const marked = note === -1 ? `${inner}${REQ_MARK}` : `${inner.slice(0, note)}${REQ_MARK}${inner.slice(note)}`;
+    return `<label for="${id}"${attrs}>${marked}</label>`;
+  });
+}
+
+/**
+ * Dropdown lists drawn in the CMS style. The browser's own pop-up list (blue highlight)
+ * can't be styled, so on desktop a styled list opens instead. The real <select> stays in the
+ * page: it keeps the value, is what the form sends, and still fires "change", so every other
+ * script (year switch, term/week, schema type...) works as before. Phones and tablets keep
+ * their own picker. Keyboard: arrows, Home/End, Enter/Space, Esc, Tab, or type a letter.
+ */
+const DROPDOWN_SCRIPT = `
+(function () {
+  if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) return;
+  var list = null, owner = null, items = [], active = -1, typed = "", typedAt = 0;
+
+  function usable(sel) {
+    return sel && sel.tagName === "SELECT" && !sel.multiple && !(sel.size > 1) && !sel.disabled;
+  }
+  function add(opt, box, inGroup) {
+    if (opt.hidden) return;
+    var el = document.createElement("div");
+    el.className = "dd-option" + (inGroup ? " in-group" : "") + (opt.disabled ? " is-disabled" : "");
+    el.setAttribute("role", "option");
+    el.id = "dd-option-" + items.length;
+    el.textContent = opt.label || opt.textContent;
+    if (opt.disabled) el.setAttribute("aria-disabled", "true");
+    el.setAttribute("aria-selected", opt.selected ? "true" : "false");
+    el.ddOption = opt;
+    items.push(el);
+    box.appendChild(el);
+  }
+  function build(sel) {
+    items = [];
+    var box = document.createElement("div");
+    box.className = "dd-list";
+    box.id = "dd-list";
+    box.setAttribute("role", "listbox");
+    box.tabIndex = -1;
+    var label = sel.labels && sel.labels[0] ? sel.labels[0].textContent.replace(/\\*/g, "").trim() : "";
+    if (label) box.setAttribute("aria-label", label);
+    Array.prototype.forEach.call(sel.children, function (node) {
+      if (node.tagName === "OPTGROUP") {
+        if (node.hidden || node.disabled) return;
+        var head = document.createElement("div");
+        head.className = "dd-group";
+        head.setAttribute("role", "presentation");
+        head.textContent = node.label;
+        box.appendChild(head);
+        Array.prototype.forEach.call(node.children, function (opt) { add(opt, box, true); });
+      } else if (node.tagName === "OPTION") {
+        add(node, box, false);
+      }
+    });
+    return box;
+  }
+  function place() {
+    var r = owner.getBoundingClientRect();
+    var vh = window.innerHeight, vw = window.innerWidth;
+    list.style.minWidth = r.width + "px";
+    list.style.maxWidth = Math.max(r.width, Math.min(480, vw - 16)) + "px";
+    var below = vh - r.bottom - 12, above = r.top - 12;
+    var want = Math.min(list.scrollHeight, 320);
+    if (below >= want || below >= above) {
+      list.style.top = (r.bottom + 4) + "px";
+      list.style.bottom = "auto";
+      list.style.maxHeight = Math.max(140, Math.min(320, below)) + "px";
+    } else {
+      list.style.top = "auto";
+      list.style.bottom = (vh - r.top + 4) + "px";
+      list.style.maxHeight = Math.max(140, Math.min(320, above)) + "px";
+    }
+    var left = Math.min(r.left, vw - list.offsetWidth - 8);
+    list.style.left = Math.max(8, left) + "px";
+  }
+  function move(i) {
+    if (i < 0 || i >= items.length) return;
+    if (items[active]) items[active].classList.remove("is-active");
+    active = i;
+    var el = items[i];
+    el.classList.add("is-active");
+    list.setAttribute("aria-activedescendant", el.id);
+    var top = el.offsetTop, bottom = top + el.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top - 6;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight + 6;
+  }
+  function step(dir, from) {
+    var i = typeof from === "number" ? from : active;
+    do { i += dir; } while (items[i] && items[i].ddOption.disabled);
+    if (items[i]) move(i);
+  }
+  function open(sel) {
+    close(false);
+    owner = sel;
+    list = build(sel);
+    if (!items.length) { list = null; owner = null; return; }
+    document.body.appendChild(list);
+    place();
+    sel.setAttribute("aria-expanded", "true");
+    sel.setAttribute("aria-controls", "dd-list");
+    var current = items.findIndex(function (el) { return el.ddOption.selected && !el.ddOption.disabled; });
+    if (current >= 0) move(current); else step(1, -1);
+    list.focus({ preventScroll: true });
+  }
+  function close(refocus) {
+    if (!list) return;
+    var sel = owner;
+    list.remove();
+    list = null; owner = null; items = []; active = -1;
+    if (sel) {
+      sel.setAttribute("aria-expanded", "false");
+      if (refocus) sel.focus({ preventScroll: true });
+    }
+  }
+  function choose(el) {
+    if (!el || el.ddOption.disabled) return;
+    var sel = owner, opt = el.ddOption, changed = !opt.selected;
+    opt.selected = true;
+    close(true);
+    if (changed) {
+      sel.dispatchEvent(new Event("input", { bubbles: true }));
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+  function typeAhead(ch) {
+    var now = Date.now();
+    typed = now - typedAt > 700 ? ch : typed + ch;
+    typedAt = now;
+    var start = typed.length === 1 ? active + 1 : active;
+    for (var n = 0; n < items.length; n++) {
+      var el = items[(start + n) % items.length];
+      if (!el.ddOption.disabled && el.textContent.trim().toLowerCase().indexOf(typed) === 0) { move(items.indexOf(el)); return; }
+    }
+  }
+
+  document.addEventListener("mousedown", function (event) {
+    if (event.button !== 0) return;
+    if (list && list.contains(event.target)) { event.preventDefault(); return; }
+    var sel = event.target.closest ? event.target.closest("select") : null;
+    if (usable(sel)) {
+      event.preventDefault();
+      if (owner === sel) { close(true); return; }
+      sel.focus({ preventScroll: true });
+      open(sel);
+      return;
+    }
+    if (list) close(false);
+  }, true);
+  document.addEventListener("click", function (event) {
+    if (!list || !list.contains(event.target)) return;
+    var el = event.target.closest(".dd-option");
+    if (el) choose(el);
+  });
+  document.addEventListener("mousemove", function (event) {
+    if (!list || !list.contains(event.target)) return;
+    var el = event.target.closest(".dd-option");
+    if (el && !el.ddOption.disabled && items.indexOf(el) !== active) move(items.indexOf(el));
+  });
+  document.addEventListener("keydown", function (event) {
+    if (list && event.target === list) {
+      var key = event.key;
+      if (key === "ArrowDown") { event.preventDefault(); step(1); }
+      else if (key === "ArrowUp") { event.preventDefault(); step(-1); }
+      else if (key === "Home") { event.preventDefault(); step(1, -1); }
+      else if (key === "End") { event.preventDefault(); step(-1, items.length); }
+      else if (key === "Enter" || key === " ") { event.preventDefault(); choose(items[active]); }
+      else if (key === "Escape") { event.preventDefault(); close(true); }
+      else if (key === "Tab") { close(true); }
+      else if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); typeAhead(key.toLowerCase()); }
+      return;
+    }
+    var sel = event.target;
+    if (!list && usable(sel) && (event.key === " " || event.key === "Enter" || event.key === "F4" || (event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")))) {
+      event.preventDefault();
+      open(sel);
+    }
+  }, true);
+  document.addEventListener("scroll", function (event) { if (list && !list.contains(event.target)) close(false); }, true);
+  window.addEventListener("resize", function () { close(false); });
+  window.addEventListener("blur", function () { close(false); });
+})();
+`;
+
 export function page(title: string, body: string, signedIn: boolean, nonce: string): string {
+  body = markRequired(body);
   const mast = signedIn
-    ? `<header class="mast"><div class="mast-inner"><a href="/admin/home">${logo()}</a><nav><a href="/admin/home">Home</a><a href="/admin/notes">Notes</a><a href="/admin/calendar">Calendar</a><a href="/admin/site">Site &amp; SEO</a><a href="/admin/help">Help</a><a href="/admin/password">Password</a><form method="post" action="/admin/logout"><button class="link" type="submit">Sign out</button></form></nav></div></header>`
+    ? `<header class="mast"><div class="mast-inner"><a href="/admin/home">${logo()}</a><nav><a href="/admin/home">Home</a><a href="/admin/notes">Blogs</a><a href="/admin/calendar">Calendar</a><a href="/admin/site">Site &amp; SEO</a><a href="/admin/help">Help</a><a href="/admin/password">Password</a><form method="post" action="/admin/logout"><button class="link" type="submit">Sign out</button></form></nav></div></header>`
     : "";
   const foot = signedIn
     ? `<footer class="colophon"><div><span>Wellsprings Academy</span><span>Think · Build · Belong</span></div></footer>`
@@ -62,7 +322,8 @@ export function page(title: string, body: string, signedIn: boolean, nonce: stri
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="googlebot" content="noindex, nofollow, noarchive">
   <title>${esc(title)} · Wellsprings CMS</title>
   <link rel="icon" type="image/png" sizes="48x48" href="/admin/brand/favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -74,6 +335,7 @@ export function page(title: string, body: string, signedIn: boolean, nonce: stri
   ${mast}
   ${body}
   ${foot}
+  ${signedIn ? `<script nonce="${esc(nonce)}">${KEEP_SCROLL_SCRIPT}${DROPDOWN_SCRIPT}</script>` : ""}
 </body>
 </html>`;
 }
@@ -142,31 +404,57 @@ function searchText(row: NoteRow): string {
     .toLowerCase();
 }
 
+const NOTES_STEP = 6;
+
 const NOTES_SEARCH_SCRIPT = `(() => {
   const input = document.getElementById("note-search");
-  if (!input) return;
   const items = Array.from(document.querySelectorAll(".search-item"));
   const groups = Array.from(document.querySelectorAll("[data-search-group]"));
   const count = document.getElementById("note-search-count");
   const none = document.getElementById("note-search-none");
+  // Each list shows ${NOTES_STEP} cards; "Show more" opens the next ${NOTES_STEP}. A search shows every match.
+  const limits = {};
+  const buttons = Array.from(document.querySelectorAll("button[data-note-more]"));
+  for (const button of buttons) limits[button.dataset.noteMore] = ${NOTES_STEP};
   function run() {
-    const words = input.value.toLowerCase().trim().split(/\\s+/).filter(Boolean);
+    const words = input ? input.value.toLowerCase().trim().split(/\\s+/).filter(Boolean) : [];
+    const shownIn = {};
     let shown = 0;
     for (const item of items) {
       const hit = words.every((word) => item.dataset.search.includes(word));
-      item.hidden = !hit;
+      const group = item.dataset.group;
+      shownIn[group] = (shownIn[group] || 0) + (hit ? 1 : 0);
+      const folded = !words.length && group in limits && shownIn[group] > limits[group];
+      item.hidden = !hit || folded;
       if (hit) shown += 1;
     }
     for (const group of groups) {
-      const name = group.dataset.searchGroup;
-      const any = items.some((item) => item.dataset.group === name && !item.hidden);
-      group.hidden = !any;
+      group.hidden = !shownIn[group.dataset.searchGroup];
     }
-    count.textContent = words.length ? shown + (shown === 1 ? " note" : " notes") + " found." : "";
-    none.hidden = !words.length || shown > 0;
+    for (const button of buttons) {
+      const name = button.dataset.noteMore;
+      const left = words.length ? 0 : Math.max(0, (shownIn[name] || 0) - limits[name]);
+      button.hidden = left === 0;
+      button.querySelector(".more-count").textContent = String(left);
+    }
+    if (count) count.textContent = words.length ? shown + (shown === 1 ? " note" : " notes") + " found." : "";
+    if (none) none.hidden = !words.length || shown > 0;
   }
-  input.addEventListener("input", run);
-  input.addEventListener("keydown", (event) => { if (event.key === "Escape") { input.value = ""; run(); } });
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      const name = button.dataset.noteMore;
+      const before = limits[name];
+      limits[name] += ${NOTES_STEP};
+      run();
+      const next = items.filter((item) => item.dataset.group === name)[before];
+      const link = next && next.querySelector("a");
+      if (link) link.focus();
+    });
+  }
+  if (input) {
+    input.addEventListener("input", run);
+    input.addEventListener("keydown", (event) => { if (event.key === "Escape") { input.value = ""; run(); } });
+  }
   run();
 })();`;
 
@@ -176,9 +464,20 @@ export function notesPage(rows: NoteRow[], nonce = ""): string {
   const published = rows.filter((row) => row.status === "published").length;
   const item = (row: NoteRow, group: string, html: string) =>
     `<div class="search-item" data-group="${group}" data-search="${esc(searchText(row))}">${html}</div>`;
-  const list = rest.length
-    ? `<div class="note-grid">${rest.map((row) => item(row, "rest", noteCard(row))).join("")}</div>`
-    : "";
+  const publishedRest = rest.filter((row) => row.status === "published");
+  const draftRest = rest.filter((row) => row.status !== "published");
+  // A titled grid of cards. The first ${NOTES_STEP} show; the rest open with "Show more".
+  const section = (group: string, title: string, list: NoteRow[]) => {
+    if (!list.length) return "";
+    const extra = list.length - NOTES_STEP;
+    return `<section class="note-section" data-search-group="${group}">
+        <div class="note-section-head"><p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>${title}</p><span class="note-section-count">${list.length}</span></div>
+        <div class="note-grid" id="grid-${group}">${list
+          .map((row, index) => item(row, group, noteCard(row)).replace(/^<div class="search-item"/, index >= NOTES_STEP ? '<div hidden class="search-item"' : '<div class="search-item"'))
+          .join("")}</div>
+        ${extra > 0 ? `<button class="secondary more-btn note-more" type="button" data-note-more="${group}" aria-controls="grid-${group}">Show more <span class="muted">(<span class="more-count">${extra}</span> more)</span></button>` : ""}
+      </section>`;
+  };
   const search = rows.length
     ? `<div class="list-search">
         <label for="note-search">Search notes</label>
@@ -188,7 +487,8 @@ export function notesPage(rows: NoteRow[], nonce = ""): string {
     : "";
   const body = rows.length
     ? `${featured ? `<div data-search-group="featured"><p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>This week's note</p></div>${item(featured, "featured", featureCard(featured))}` : ""}
-       ${rest.length ? `<div data-search-group="rest"><p class="eyebrow section-label"><span class="rule" aria-hidden="true"></span>${featured ? "More notes" : "All notes"}</p></div>${list}` : ""}
+       ${section("published", featured ? "More published notes" : "Published notes", publishedRest)}
+       ${section("drafts", "Drafts", draftRest)}
        <p id="note-search-none" class="empty-search" hidden>No notes match that search.</p>`
     : `<div class="empty">${eyebrow("Nothing on the desk")}<h2>No notes yet.</h2><p class="intro">The first note you publish is what parents find on the website.</p></div>`;
   return `<main class="sheet">
@@ -216,6 +516,7 @@ export function notesPage(rows: NoteRow[], nonce = ""): string {
 
 export type EditorForm = NoteInput & {
   id: string | null;
+  uid: string | null;
   savedStatus: NoteRow["status"] | null;
   slugLocked: boolean;
   coverWidth: number | null;
@@ -239,6 +540,7 @@ function parseGradeValue(value: string): number | null {
 export function editorFromRow(row: NoteRow): EditorForm {
   return {
     id: row.id,
+    uid: row.uid || null,
     savedStatus: row.status,
     slugLocked: row.slug_locked,
     title: row.title,
@@ -263,6 +565,11 @@ export function editorFromRow(row: NoteRow): EditorForm {
     nameConsent: row.name_consent,
     seoTitle: row.seo_title,
     seoDescription: row.seo_description,
+    seoKeywords: row.seo_keywords,
+    seoCanonical: row.seo_canonical,
+    seoNoindex: row.seo_noindex,
+    seoSchemaType: row.seo_schema_type,
+    seoSchemaJson: row.seo_schema_json,
     coverImage: row.cover_image,
     coverWidth: row.cover_width,
     coverHeight: row.cover_height,
@@ -294,7 +601,7 @@ export function editorFromRequest(body: unknown, base: EditorForm): EditorForm {
     authorGrade: parseGradeValue(str("authorGrade")),
     imageAlt: str("imageAlt"),
     caption: str("caption"),
-    slug: base.slugLocked ? base.slug : str("slug") || null,
+    slug: str("slug") || null,
     publishDate: str("publishDate") || base.publishDate,
     featured: on("featured"),
     includesStudent,
@@ -302,6 +609,11 @@ export function editorFromRequest(body: unknown, base: EditorForm): EditorForm {
     nameConsent: includesStudent ? on("nameConsent") : false,
     seoTitle: str("seoTitle") || null,
     seoDescription: str("seoDescription") || null,
+    seoKeywords: str("seoKeywords"),
+    seoCanonical: str("seoCanonical"),
+    seoNoindex: on("seoHidden"),
+    seoSchemaType: str("seoSchemaType"),
+    seoSchemaJson: str("seoSchemaMode") === "custom" ? str("seoSchemaJson") : "",
     coverImage: str("coverImage") || null,
     coverWidth: str("coverWidth") ? Number(str("coverWidth")) || null : base.coverWidth,
     coverHeight: str("coverHeight") ? Number(str("coverHeight")) || null : base.coverHeight,
@@ -311,6 +623,7 @@ export function editorFromRequest(body: unknown, base: EditorForm): EditorForm {
 export function blankEditor(): EditorForm {
   return {
     id: null,
+    uid: null,
     savedStatus: null,
     slugLocked: false,
     title: "",
@@ -335,6 +648,11 @@ export function blankEditor(): EditorForm {
     nameConsent: false,
     seoTitle: null,
     seoDescription: null,
+    seoKeywords: "",
+    seoCanonical: "",
+    seoNoindex: false,
+    seoSchemaType: "",
+    seoSchemaJson: "",
     coverImage: null,
     coverWidth: null,
     coverHeight: null,
@@ -357,7 +675,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
   const cover = form.coverImage && COVER_PATH.test(form.coverImage) ? form.coverImage : "";
   const deleteBase = form.savedStatus === "published" ? COPY.deletePublishedNote : COPY.deleteDraft;
   const deleteConfirm = form.slugLocked && form.slug
-    ? `${deleteBase} The URL /blog/${form.slug} will be given up.`
+    ? `${deleteBase} The URL /blog/${notePath(form)} will be given up.`
     : deleteBase;
   const pillarLabel = form.pillar ? form.pillar[0].toUpperCase() + form.pillar.slice(1) : "Pillar";
   const term1Weeks = Array.from({ length: 25 }, (_, index) => index + 1)
@@ -396,18 +714,18 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           <span id="title-count" class="count"></span>
         </div>
         <div class="field">
-          <label for="excerpt">Short summary</label>
+          <label for="excerpt">Short summary<span class="req" aria-hidden="true">*</span></label>
           <textarea id="excerpt" class="short" name="excerpt" maxlength="300" rows="3">${esc(form.excerpt)}</textarea>
           <span class="help">Under the title on /blog. Also used for search and sharing when those fields stay automatic.</span>
           <span id="excerpt-count" class="count"></span>
         </div>
         <div class="field">
-          <label for="body">The note</label>
+          <label for="body">The note<span class="req" aria-hidden="true">*</span></label>
           <textarea id="body" name="bodyText">${esc(form.bodyText)}</textarea>
           <span class="help">A blank line starts a new paragraph. The first paragraph is larger on the article.</span>
         </div>
         <div class="field">
-          <label for="pillar">Think, Build, or Belong</label>
+          <label for="pillar">Think, Build, or Belong<span class="req" aria-hidden="true">*</span></label>
           ${pillarCards(form.pillar)}
           <select id="pillar" class="sr" name="pillar" tabindex="-1" aria-hidden="true">
             <option value="">Choose</option>
@@ -421,10 +739,10 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           <span class="help">The coloured tag.</span>
         </div>
         <div class="field">
-          <span class="label" id="school-date-label">School date</span>
+          <span class="label" id="school-date-label">School date<span class="req" aria-hidden="true">*</span></span>
           <div class="field-row" role="group" aria-labelledby="school-date-label">
             <div>
-              <label for="termSelect">Term</label>
+              <label for="termSelect">Term<span class="req" aria-hidden="true">*</span></label>
               <select id="termSelect">
                 <option value="">Choose term</option>
                 <option value="1"${parsedDate?.term === "1" ? " selected" : ""}>Term 1</option>
@@ -432,7 +750,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
               </select>
             </div>
             <div>
-              <label for="weekSelect">Week</label>
+              <label for="weekSelect">Week<span class="req" aria-hidden="true">*</span></label>
               <select id="weekSelect"${parsedDate ? "" : " disabled"}>
                 <option value="">Choose week</option>
                 <optgroup id="term1-weeks" label="Term 1"${parsedDate?.term === "1" ? "" : " hidden"}>${term1Weeks}</optgroup>
@@ -445,7 +763,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           <span class="help">Printed on the card and under the title.</span>
         </div>
         <div class="field">
-          <span class="label">Written by</span>
+          <span class="label">Written by<span class="req" aria-hidden="true">*</span></span>
           <span class="help">Shown on the featured note and the article. Cards show the school date only.</span>
           ${legacyAuthor ? `<p class="help" id="author-legacy">Current: ${esc(form.author)}</p>` : ""}
           <input id="author" name="author" type="hidden" value="${esc(form.author)}">
@@ -458,7 +776,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
               </select>
             </div>
             <div class="field">
-              <label for="authorFirstName">First name</label>
+              <label for="authorFirstName">First name<span class="req" aria-hidden="true">*</span></label>
               <input id="authorFirstName" name="authorFirstName" type="text" maxlength="24" autocomplete="off" value="${esc(form.authorFirstName)}">
             </div>
             <div class="field">
@@ -468,7 +786,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           </div>
           <div class="author-meta">
             <div class="field">
-              <label for="authorDesignation">Designation</label>
+              <label for="authorDesignation">Designation<span class="req" aria-hidden="true">*</span></label>
               <select id="authorDesignation" name="authorDesignation">
                 <option value="">Choose designation</option>
                 ${DESIGNATIONS.map((item) => `<option value="${esc(item)}"${form.authorDesignation === item ? " selected" : ""}>${esc(item)}</option>`).join("")}
@@ -489,7 +807,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
       <section class="panel">
         ${eyebrow("Photograph")}
         <div class="field">
-          <label for="coverFile">Cover photo</label>
+          <label for="coverFile">Cover photo<span class="req" aria-hidden="true">*</span></label>
           <input id="coverFile" type="file" accept="image/jpeg,image/png,image/webp">
           <input id="coverImage" name="coverImage" type="hidden" value="${esc(cover)}">
           <input id="coverWidth" name="coverWidth" type="hidden" value="${form.coverWidth ?? ""}">
@@ -500,7 +818,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
           <img id="coverPreview" class="frame wide" alt="" width="${COVER_WIDTH}" height="${COVER_HEIGHT}"${cover ? ` src="${esc(cover)}"` : " hidden"}>
         </div>
         <div class="field">
-          <label for="imageAlt">What is in the photo</label>
+          <label for="imageAlt">What is in the photo<span class="req" aria-hidden="true">*</span></label>
           <input id="imageAlt" name="imageAlt" type="text" maxlength="200" value="${esc(form.imageAlt)}">
           <span class="help">For screen readers. Describe the scene.</span>
         </div>
@@ -513,9 +831,9 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
       <section class="panel">
         ${eyebrow("Publishing")}
         <div class="field">
-          <label for="slug">URL</label>
-          <div class="slug"><span>/blog/</span><input id="slug" name="slug" type="text" maxlength="80" spellcheck="false" autocapitalize="off" autocomplete="off" value="${esc(form.slug ?? "")}"${form.slugLocked ? " readonly" : ""}></div>
-          <span class="help">Becomes /blog/this-text. Change it only before the first publish. After that it stays, so shared links keep working.</span>
+          <label for="slug">URL<span class="req" aria-hidden="true">*</span></label>
+          <div class="slug"><span>/blog/</span><span id="slug-uid" class="slug-uid" title="Unique id: set once, cannot be changed">${form.uid ? esc(form.uid) + "-" : ""}</span><input id="slug" name="slug" type="text" maxlength="80" spellcheck="false" autocapitalize="off" autocomplete="off" value="${esc(form.slug ?? "")}"></div>
+          <span class="help">Becomes /blog/${form.uid ? "" : "id-"}this-text. The id before it is unique to this note and cannot be changed; the text after it can be edited any time, and old shared links still open the note.</span>
         </div>
         <div class="field">
           <label for="publishDate">Calendar date</label>
@@ -527,7 +845,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
       </section>
       <section class="panel">
         <div class="seo-head">
-          ${eyebrow("Search and sharing")}
+          ${eyebrow("Search and sharing (meta title & description)")}
           <span id="seo-badge" class="badge">${seoAutomatic ? "Automatic" : "Customised"}</span>
         </div>
         <p class="help">This is how the note appears on Google and when shared on WhatsApp or Facebook.</p>
@@ -564,6 +882,25 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
             </div>
           </div>
         </div>
+        <h3 class="seo-sub">More search settings</h3>
+        ${seoExtrasHtml(
+          {
+            keywords: form.seoKeywords,
+            canonical: form.seoCanonical,
+            noindex: form.seoNoindex,
+            author: "",
+            schemaType: form.seoSchemaType,
+            schemaJson: form.seoSchemaJson,
+          },
+          {
+            kind: "note",
+            autoCanonical: absolute(`/blog/${notePath(form)}`),
+            author: false,
+            autoAuthor: form.author || "",
+            pageLabel: "this note",
+            jsonLd: noteJsonLd(form, seoTitleValue, seoDescriptionValue, cover),
+          },
+        )}
       </section>
       <section class="panel">
         ${eyebrow("Before you publish")}
@@ -617,6 +954,7 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
     }
   </main>
     <script nonce="${esc(nonce)}">${editorScript(Boolean(form.id))}</script>
+    <script nonce="${esc(nonce)}">${SEO_EXTRAS_SCRIPT}</script>
     <script nonce="${esc(nonce)}">${autosaveScript("note-form", "note", "data-note-id", "explicit")}</script>`;
 }
 
@@ -894,7 +1232,7 @@ function editorScript(hasSavedNote: boolean): string {
     function refreshSeoPreview() {
       const titleText = seoTitle.value.trim() || autoTitle(title.value);
       const descriptionText = seoDescription.value.trim() || autoDescription(excerpt.value);
-      const path = "/blog/" + (slug.value.trim() || "your-note");
+      const path = "/blog/" + (document.getElementById("slug-uid")?.textContent || "") + (slug.value.trim() || "your-note");
       seoGoogleTitle.textContent = cut(titleText, 60);
       seoGoogleUrl.textContent = "localhost:8080" + path;
       seoGoogleDescription.textContent = cut(descriptionText, 160);
@@ -995,6 +1333,12 @@ function editorScript(hasSavedNote: boolean): string {
         nameConsent: nameConsent.checked,
         seoTitle: seoTitle.value,
         seoDescription: seoDescription.value,
+        seoKeywords: document.getElementById("seoKeywords").value,
+        seoCanonical: document.getElementById("seoCanonical").value,
+        seoHidden: (document.querySelector("input[name=seoHidden]:checked") || {}).value || "",
+        seoSchemaType: document.getElementById("seoSchemaType").value,
+        seoSchemaMode: (document.querySelector("input[name=seoSchemaMode]:checked") || {}).value || "auto",
+        seoSchemaJson: document.getElementById("seoSchemaJson").value,
         coverImage: coverImage.value,
         status,
       };
@@ -1143,6 +1487,8 @@ function editorScript(hasSavedNote: boolean): string {
         }
         noteId = json.id || noteId;
         form.dataset.noteId = noteId;
+        const uidBox = document.getElementById("slug-uid");
+        if (uidBox && json.uid && !uidBox.textContent) { uidBox.textContent = json.uid + "-"; refreshSeoPreview(); }
         form.action = "/admin/notes/" + noteId;
         hasSavedNote = true;
         dirty = false;

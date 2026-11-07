@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import type { EventRow, FilterRow, PhotoRow, RhythmRow, YearRow } from "./db.ts";
 import { autosaveScript } from "../autosave.ts";
+import { absolute, keywordList, SCHOOL_NAME, schemaTypeOf, SEO_EXTRAS_SCRIPT, seoExtrasHtml } from "../seo-fields.ts";
 import {
   CAL_COPY,
   COLOR_KEYS,
   MAX_PHOTOS,
+  MONTH_NAMES,
   STATE_LABEL,
   autoEventSeoDescription,
   autoEventSeoTitle,
@@ -143,6 +145,61 @@ Array.prototype.forEach.call(document.querySelectorAll("button[data-more]"), fun
   });
 })();
 
+// Preview photos: a sideways strip; the arrows move one photo at a time.
+Array.prototype.forEach.call(document.querySelectorAll("[data-carousel]"), function (box) {
+  var strip = box.querySelector(".preview-photos");
+  var buttons = box.querySelectorAll("button[data-dir]");
+  if (!strip || !buttons.length) return;
+  function step() { var first = strip.querySelector("img"); return first ? first.getBoundingClientRect().width + 8 : strip.clientWidth; }
+  function update() {
+    buttons[0].disabled = strip.scrollLeft <= 1;
+    buttons[1].disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+  }
+  Array.prototype.forEach.call(buttons, function (button) {
+    button.addEventListener("click", function () { strip.scrollBy({ left: Number(button.getAttribute("data-dir")) * step(), behavior: "smooth" }); });
+  });
+  strip.addEventListener("scroll", update, { passive: true });
+  update();
+});
+
+// Filters / rhythm: a card named in the address (#opt-… after a save) is never left folded away.
+(function () {
+  var id = window.location.hash.slice(1);
+  if (!/^opt-[0-9a-f-]{36}$/i.test(id)) return;
+  var card = document.getElementById(id);
+  if (!card) return;
+  if (card.hidden) {
+    var list = card.parentElement;
+    Array.prototype.forEach.call(list.querySelectorAll("li[hidden]"), function (li) { li.hidden = false; });
+    var more = document.querySelector('[data-more="' + list.id + '"]');
+    if (more) more.hidden = true;
+  }
+  card.scrollIntoView({ block: "center" });
+})();
+
+// Dashboard: rename the theme in place.
+(function () {
+  var toggle = document.getElementById("theme-edit-toggle");
+  var form = document.getElementById("theme-edit");
+  if (!toggle || !form) return;
+  function show(open) {
+    form.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) form.querySelector("input").focus();
+  }
+  toggle.addEventListener("click", function () { show(form.hidden); });
+  document.getElementById("theme-edit-cancel").addEventListener("click", function () { form.reset(); show(false); });
+})();
+
+// Year dropdown on Events: switching year opens that year straight away (strands differ per year).
+Array.prototype.forEach.call(document.querySelectorAll("select[data-autosubmit]"), function (select) {
+  select.addEventListener("change", function () {
+    var form = select.form;
+    ["month", "strand"].forEach(function (name) { var field = form.elements[name]; if (field) field.disabled = true; });
+    form.submit();
+  });
+});
+
 // Filter groups: remember which groups are open while moving between saves.
 (function () {
   var groups = document.querySelectorAll("details[data-group-id]");
@@ -192,9 +249,8 @@ export function calendarShell(
     ["dashboard", "/admin/calendar", "Dashboard"],
     ["events", "/admin/calendar/events", "Events"],
     ["months", "/admin/calendar/months", "Months"],
-    ["filters", "/admin/calendar/filters", "Filters"],
+    ["filters", "/admin/calendar/filters", "Strands"],
     ["rhythm", "/admin/calendar/rhythm", "All-year rhythm"],
-    ["settings", "/admin/calendar/settings", "Page & SEO"],
     ["years", "/admin/calendar/years", "Years"],
   ];
   const subnav =
@@ -278,7 +334,16 @@ export function dashboardBody(
       <div class="page-head-row">
         <div>
           ${eyebrow(`Theme of the Year · ${year.label}`)}
-          <h1>${esc(year.theme_name)}</h1>
+          <div class="theme-title">
+            <h1>${esc(year.theme_name)}</h1>
+            <button class="inline-link" type="button" id="theme-edit-toggle" aria-expanded="false" aria-controls="theme-edit">Rename theme</button>
+          </div>
+          <form class="inline-form theme-edit" id="theme-edit" method="post" action="/admin/calendar/settings" hidden>
+            <div class="field grow"><label for="themeName">Theme name</label>
+              <input id="themeName" name="themeName" type="text" maxlength="40" required value="${esc(year.theme_name)}"></div>
+            <button class="primary" type="submit">Save</button>
+            <button class="secondary" type="button" id="theme-edit-cancel">Cancel</button>
+          </form>
           <p class="intro">Plan the event, publish it, then add photos once it is done.</p>
         </div>
         <a class="button" href="/admin/calendar/events/new">New event</a>
@@ -331,6 +396,8 @@ export function eventsBody(
   strands: FilterRow[],
   filter: { strand: string; state: string; q?: string },
   notice: string,
+  strandLabel = "Strand",
+  years: YearRow[] = [],
 ): string {
   const keys = monthKeys(year.first_month, year.last_month);
   const byId = new Map(strands.map((row) => [row.id, row]));
@@ -381,20 +448,31 @@ export function eventsBody(
       </div>
     </header>
     ${banner("", notice)}
-    <form class="filters-row" method="get" action="/admin/calendar/events">
+    <form class="filters-row events-filters" method="get" action="/admin/calendar/events" role="search">
       <input type="hidden" name="month" value="${esc(month)}">
-      <div class="field"><label for="f-q">Search the year</label>
-        <input id="f-q" name="q" type="search" maxlength="80" autocomplete="off" placeholder="Title, grade, plan…" value="${esc(filter.q ?? "")}"></div>
-      <div class="field"><label for="f-strand">Strand</label>
-        <select id="f-strand" name="strand"><option value="">All strands</option>${strands
+      <div class="field search-field"><label for="f-q">Search</label>
+        <span class="search-box"><svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="f-q" name="q" type="search" maxlength="80" autocomplete="off" placeholder="Title, grade, plan…" value="${esc(filter.q ?? "")}"></span></div>
+      ${
+        years.length > 1
+          ? `<div class="field"><label for="f-year">Year</label>
+        <select id="f-year" name="year" data-autosubmit>${years
+          .map((row) => `<option value="${esc(row.id)}"${row.id === year.id ? " selected" : ""}>${esc(row.label)}${row.is_current ? " (on site)" : ""}</option>`)
+          .join("")}</select></div>`
+          : ""
+      }
+      <div class="field"><label for="f-strand">${esc(strandLabel)}</label>
+        <select id="f-strand" name="strand"><option value="">All</option>${strands
           .map((row) => `<option value="${esc(row.id)}"${row.id === filter.strand ? " selected" : ""}>${esc(row.name)}${row.active ? "" : " (hidden)"}</option>`)
           .join("")}</select></div>
       <div class="field"><label for="f-state">State</label>
         <select id="f-state" name="state">${stateOptions
           .map(([value, label]) => `<option value="${value}"${value === filter.state ? " selected" : ""}>${label}</option>`)
           .join("")}</select></div>
-      <button class="secondary" type="submit">${searching ? "Search" : "Filter"}</button>
-      ${searching || filter.strand || filter.state ? `<a class="button secondary" href="/admin/calendar/events?month=${esc(month)}">Clear</a>` : ""}
+      <div class="filters-actions">
+        <button class="secondary" type="submit">${searching ? "Search" : "Filter"}</button>
+        ${searching || filter.strand || filter.state ? `<a class="button secondary" href="/admin/calendar/events?month=${esc(month)}">Clear</a>` : ""}
+      </div>
     </form>
     <div class="cal-layout">
       <nav class="month-rail" aria-label="Months">${rail}</nav>
@@ -425,6 +503,8 @@ export type EditorModel = {
   error: string;
   notice: string;
   tab: "plan" | "after" | "seo";
+  /** Name of the main filter group (renamed by the admin under Filters). */
+  strandLabel: string;
 };
 
 export function editorValuesFromRow(row: EventRow): EventInput {
@@ -443,6 +523,13 @@ export function editorValuesFromRow(row: EventRow): EventInput {
     showMoved: row.moved_from !== null,
     seoTitle: row.seo_title,
     seoDescription: row.seo_description,
+    seoKeywords: row.seo_keywords,
+    seoNoindex: row.seo_noindex,
+    slug: row.slug,
+    seoCanonical: row.seo_canonical,
+    seoSchemaType: row.seo_schema_type,
+    seoSchemaJson: row.seo_schema_json,
+    seoSchemaProblem: "",
     intent: "save",
   };
 }
@@ -463,8 +550,37 @@ export function blankValues(startDate: string): EventInput {
     showMoved: false,
     seoTitle: "",
     seoDescription: "",
+    seoKeywords: "",
+    seoNoindex: false,
+    slug: "",
+    seoCanonical: "",
+    seoSchemaType: "",
+    seoSchemaJson: "",
+    seoSchemaProblem: "",
     intent: "save",
   };
+}
+
+/** The Event markup the website adds when the event's pop-up link is opened. */
+function eventJsonLd(values: EventInput, slug: string, title: string, description: string, image: string): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    "@context": "https://schema.org",
+    "@type": schemaTypeOf("event", values.seoSchemaType),
+    name: values.title || title,
+    description,
+    startDate: values.startDate,
+    endDate: values.endDate || values.startDate,
+    eventAttendanceMode: "https://schema.org/OfflineEventAttendanceMode",
+    eventStatus: "https://schema.org/EventScheduled",
+    url: absolute(`/theme-of-the-year?event=${slug || "…"}`),
+    mainEntityOfPage: values.seoCanonical || absolute(`/theme-of-the-year?event=${slug || "…"}`),
+    location: { "@type": "Place", name: SCHOOL_NAME, address: "Bengaluru, Karnataka, IN" },
+    organizer: { "@type": "EducationalOrganization", name: SCHOOL_NAME, url: absolute("/") },
+  };
+  if (image) data.image = absolute(image);
+  const keywords = keywordList(values.seoKeywords);
+  if (keywords.length) data.keywords = keywords.join(", ");
+  return data;
 }
 
 function counter(id: string, max: number, warn: number): string {
@@ -484,7 +600,7 @@ export function editorBody(model: EditorModel): string {
   const seoDescription = values.seoDescription || autoEventSeoDescription(values.subtitle, values.body);
 
   const strandField = `<fieldset>
-      <legend class="label">Strand</legend>
+      <legend class="label">${esc(model.strandLabel)}<span class="req" aria-hidden="true">*</span></legend>
       <div class="swatches">${visibleStrands
         .map(
           (row) => `<label class="swatch ${colorClass(row.color_key)}"><input type="radio" name="strandId" value="${esc(row.id)}"${row.id === values.strandId ? " checked" : ""} required><span><i aria-hidden="true"></i>${esc(row.name)}${row.active ? "" : " (hidden)"}</span></label>`,
@@ -546,7 +662,7 @@ export function editorBody(model: EditorModel): string {
         ${groups.some(({ group }) => group.name.toLowerCase() === "grade") ? `<button class="inline-link" type="button" id="suggest-grades">Suggest from the Grade options</button>` : ""}
       </div>
       <div class="field">
-        <label for="body">The plan</label>
+        <label for="body">The plan<span class="req" aria-hidden="true">*</span></label>
         <textarea id="body" name="body" maxlength="1200" rows="8">${esc(values.body)}</textarea>
         ${counter("body", 1200, 1200)}
         <span class="help">What parents read before the event. A blank line starts a new paragraph. Required to publish.</span>
@@ -617,25 +733,60 @@ export function editorBody(model: EditorModel): string {
     </div>
   </section>`;
 
+  const slugValue = values.slug || event?.slug || "";
+  // Unique id (given on first save, never edited) goes before the title in the pop-up link.
+  const uidPrefix = event?.uid ? `${event.uid}-` : "";
+  const publicSlug = slugValue ? uidPrefix + slugValue : "";
+  const popupPath = `/theme-of-the-year?event=${publicSlug || "…"}`;
   const seo = `<section class="tab-panel" id="tab-seo" role="tabpanel" aria-labelledby="t-seo">
     <div class="panel">
-      <div class="field">
-        <label for="seoTitle">Search title</label>
-        <input id="seoTitle" name="seoTitle" type="text" maxlength="200" value="${esc(values.seoTitle)}" placeholder="${esc(autoEventSeoTitle(values.title || "Title", year.theme_name))}">
-        ${counter("seoTitle", 200, 60)}
-        <span class="help">Leave empty and it is filled in on save. Used when someone shares this event.</span>
-      </div>
-      <div class="field">
-        <label for="seoDescription">Search description</label>
-        <textarea id="seoDescription" class="short" name="seoDescription" maxlength="300" rows="3" placeholder="Filled from the subtitle on save">${esc(values.seoDescription)}</textarea>
-        ${counter("seoDescription", 300, 155)}
+      <h2 class="seo-sub">Search and sharing <span class="muted">(meta title &amp; description)</span></h2>
+      <p class="help seo-lead">How this event’s link looks on Google and WhatsApp.</p>
+      <div class="seo-grid event-seo-grid">
+        <div class="field span-2">
+          <label for="slug">Event link <span class="muted">(opens this event’s pop-up)</span></label>
+          <div class="slug event-slug"><span title="https://www.wellspringsacademy.in/theme-of-the-year?event=">/theme-of-the-year?event=</span><span id="slug-uid" class="slug-uid" title="Unique id: set once, cannot be changed">${esc(uidPrefix)}</span><input id="slug" name="slug" type="text" maxlength="100" spellcheck="false" autocapitalize="off" autocomplete="off" value="${esc(slugValue)}" placeholder="2026-06-12-sports-day"></div>
+          <span class="help">${
+            event?.slug_locked
+              ? "Small letters, numbers and hyphens. Changing it breaks links already shared."
+              : "Small letters, numbers and hyphens. Fills itself in until you publish."
+          } ${uidPrefix ? "The id before it is unique to this event and cannot be changed." : "A unique id is put before it on first save."}</span>
+        </div>
+        <div class="field">
+          <label for="seoTitle">Search title</label>
+          <input id="seoTitle" name="seoTitle" type="text" maxlength="200" value="${esc(values.seoTitle)}" placeholder="${esc(autoEventSeoTitle(values.title || "Title", year.theme_name))}">
+          <div class="field-foot"><span class="help">Empty = filled in on save.</span>${counter("seoTitle", 200, 60)}</div>
+        </div>
+        <div class="field">
+          <label for="seoDescription">Search description</label>
+          <input id="seoDescription" name="seoDescription" type="text" maxlength="300" value="${esc(values.seoDescription)}" placeholder="Filled from the subtitle">
+          <div class="field-foot"><span class="help">Empty = the subtitle.</span>${counter("seoDescription", 300, 155)}</div>
+        </div>
       </div>
       <div class="google-result">
-        <p class="google-url">wellspringsacademy.in › theme-of-the-year</p>
+        <p class="google-url" id="g-url">wellspringsacademy.in › theme-of-the-year?event=${esc(publicSlug)}</p>
         <p class="google-title" id="g-title">${esc(seoTitle)}</p>
         <p class="google-description" id="g-desc">${esc(seoDescription)}</p>
       </div>
-      ${event ? `<p class="help">Link: <code>/theme-of-the-year?event=${esc(event.slug)}</code>${event.slug_locked ? " (locked, so shared links keep working)" : " (set from the date and title until the first publish)"}</p>` : ""}
+      <h3 class="seo-sub">More search settings</h3>
+      ${seoExtrasHtml(
+        {
+          keywords: values.seoKeywords,
+          canonical: values.seoCanonical,
+          noindex: values.seoNoindex,
+          author: "",
+          schemaType: values.seoSchemaType,
+          schemaJson: values.seoSchemaJson,
+        },
+        {
+          kind: "event",
+          autoCanonical: absolute(popupPath),
+          author: false,
+          autoAuthor: SCHOOL_NAME,
+          pageLabel: "this event",
+          jsonLd: eventJsonLd(values, publicSlug, seoTitle, seoDescription, photos[0]?.thumb ?? ""),
+        },
+      )}
     </div>
   </section>`;
 
@@ -683,6 +834,20 @@ function lastDay(monthStart: string): string {
   const [year, month] = monthStart.slice(0, 7).split("-").map(Number);
   return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
 }
+
+/** Live pop-up link in the Google preview, plus the shared SEO block's script. */
+export const EVENT_SEO_SCRIPT = `
+(function () {
+  var slug = document.getElementById("slug");
+  var url = document.getElementById("g-url");
+  if (slug && url) slug.addEventListener("input", function () {
+    var clean = slug.value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-{2,}/g, "-");
+    if (clean !== slug.value) slug.value = clean;
+    var uid = document.getElementById("slug-uid");
+    url.textContent = "wellspringsacademy.in › theme-of-the-year?event=" + (uid ? uid.textContent : "") + clean;
+  });
+})();
+` + SEO_EXTRAS_SCRIPT;
 
 export const EDITOR_SCRIPT = `
 (function () {
@@ -975,7 +1140,10 @@ export function previewBody(event: EventRow, strand: FilterRow | undefined, phot
           <p class="kicker">Event photos <span class="muted">· After the event</span></p>
           ${
             shownPhotos.length
-              ? `<div class="preview-photos">${shownPhotos.map((photo) => `<img src="${esc(photo.thumb)}" alt="${esc(photo.alt)}" width="${photo.width}" height="${photo.height}" loading="lazy">`).join("")}</div>${event.recap ? `<p class="body">${esc(event.recap)}</p>` : ""}`
+              ? `<div class="photo-carousel" data-carousel>
+                  <div class="preview-photos" tabindex="0" aria-label="Event photos, scroll sideways">${shownPhotos.map((photo) => `<img src="${esc(photo.thumb)}" alt="${esc(photo.alt)}" width="${photo.width}" height="${photo.height}" loading="lazy">`).join("")}</div>
+                  ${shownPhotos.length > 3 ? `<div class="carousel-nav"><button class="secondary sm icon" type="button" data-dir="-1" aria-label="Previous photos">←</button><span class="carousel-count muted">${shownPhotos.length} photos</span><button class="secondary sm icon" type="button" data-dir="1" aria-label="Next photos">→</button></div>` : ""}
+                </div>${event.recap ? `<p class="body">${esc(event.recap)}</p>` : ""}`
               : `<p class="body muted">Photos will be added after the event.</p>`
           }
         </div>
@@ -1011,81 +1179,72 @@ function swatchPicker(name: string, selected: string | null, idPrefix: string): 
   ).join("")}</div>`;
 }
 
+const OPT_STEP = 6;
+
 export function filtersBody(groups: Array<{ group: FilterRow; options: FilterRow[] }>, usage: Map<string, number>, error: string, notice: string): string {
-  const sections = groups
-    .map(({ group, options }) => {
-      const main = group.is_main;
-      const optionRows = options
-        .map((option) => {
-          const used = usage.get(option.id) ?? 0;
-          return `<form class="row-form${option.active ? "" : " row-hidden"}" method="post" action="/admin/calendar/filters/${esc(option.id)}">
-            <div class="row-line">
-              <div class="field grow"><label for="o-${esc(option.id)}">Option</label>
-                <input id="o-${esc(option.id)}" name="name" type="text" maxlength="40" required value="${esc(option.name)}"></div>
-              <label class="check"><input type="checkbox" name="active"${option.active ? " checked" : ""}> Shown</label>
-            </div>
-            ${main ? swatchPicker("colorKey", option.color_key, `c-${option.id}`) : ""}
-            <div class="row-line">
-              <button class="secondary" type="submit">Save</button>
-              <button class="secondary" type="submit" name="dir" value="up" formaction="/admin/calendar/filters/${esc(option.id)}/move" aria-label="Move ${esc(option.name)} up">↑</button>
-              <button class="secondary" type="submit" name="dir" value="down" formaction="/admin/calendar/filters/${esc(option.id)}/move" aria-label="Move ${esc(option.name)} down">↓</button>
-              <button class="secondary danger" type="submit" formaction="/admin/calendar/filters/${esc(option.id)}/delete" data-confirm="Delete “${esc(option.name)}”?"${used ? " disabled title=\"In use. Hide it instead.\"" : ""}>Delete</button>
-              <span class="help">${used ? `Used by ${used}` : "Not used"}</span>
-            </div>
-          </form>`;
-        })
-        .join("");
-      const inner = `
-        <form method="post" action="/admin/calendar/filters/${esc(group.id)}">
-          ${main ? `<div class="group-head"><h2>${esc(group.name)} <span class="badge">Main · colours the cards</span></h2></div>` : ""}
-          <div class="row-line mt">
-            <div class="field grow"><label for="g-${esc(group.id)}">Group name</label>
-              <input id="g-${esc(group.id)}" name="name" type="text" maxlength="40" required value="${esc(group.name)}"></div>
-            ${main ? "" : `<label class="check"><input type="checkbox" name="showOnSite"${group.show_on_site ? " checked" : ""}> Show as a filter row on the site</label>
-            <label class="check"><input type="checkbox" name="active"${group.active ? " checked" : ""}> Active</label>`}
+  const entry = groups.find(({ group }) => group.is_main);
+  if (!entry) {
+    return `<header class="page-head">${eyebrow("Strands")}<h1>How parents filter the year.</h1></header>${banner(error, notice)}`;
+  }
+  const { group, options } = entry;
+  const gid = esc(group.id);
+  const cards = options
+    .map((option, index) => {
+      const oid = esc(option.id);
+      const used = usage.get(option.id) ?? 0;
+      return `<li class="opt-card ${colorClass(option.color_key)}${option.active ? "" : " row-hidden"}" id="opt-${oid}"${index >= OPT_STEP ? " hidden" : ""}>
+        <form method="post" action="/admin/calendar/filters/${oid}">
+          <div class="opt-top">
+            <div class="field grow"><label for="o-${oid}">Name</label>
+              <input id="o-${oid}" name="name" type="text" maxlength="40" required value="${esc(option.name)}"></div>
+            <div class="field opt-shown-field"><span class="label">On the site</span>
+              <label class="check opt-shown"><input type="checkbox" name="active"${option.active ? " checked" : ""}> Shown</label></div>
           </div>
-          <div class="row-line mt mb">
-            <button class="secondary" type="submit">Save group</button>
-            ${main ? "" : `<button class="secondary" type="submit" name="dir" value="up" formaction="/admin/calendar/filters/${esc(group.id)}/move">↑</button>
-            <button class="secondary" type="submit" name="dir" value="down" formaction="/admin/calendar/filters/${esc(group.id)}/move">↓</button>
-            <button class="secondary danger" type="submit" formaction="/admin/calendar/filters/${esc(group.id)}/delete" data-confirm="${options.length ? `Delete the group “${esc(group.name)}” and its ${options.length} option${options.length === 1 ? "" : "s"}? This cannot be undone.` : `Delete the group “${esc(group.name)}”?`}">Delete group</button>`}
+          <span class="label opt-colour-label">Colour<span class="req" aria-hidden="true">*</span></span>
+          ${swatchPicker("colorKey", option.color_key, `c-${option.id}`)}
+          <div class="opt-actions">
+            <div class="opt-actions-left">
+              <button class="primary sm" type="submit">Save</button>
+              <button class="secondary sm icon" type="submit" name="dir" value="up" formaction="/admin/calendar/filters/${oid}/move" aria-label="Move ${esc(option.name)} up"${index === 0 ? " disabled" : ""}>↑</button>
+              <button class="secondary sm icon" type="submit" name="dir" value="down" formaction="/admin/calendar/filters/${oid}/move" aria-label="Move ${esc(option.name)} down"${index === options.length - 1 ? " disabled" : ""}>↓</button>
+            </div>
+            <div class="opt-actions-right">
+              <span class="opt-used">${used ? `Used by ${used}` : "Not used"}</span>
+              <button class="secondary sm danger" type="submit" formaction="/admin/calendar/filters/${oid}/delete" data-confirm="Delete “${esc(option.name)}”?"${used ? ' disabled title="In use. Untick Shown to hide it instead."' : ""}>Delete</button>
+            </div>
           </div>
         </form>
-        ${optionRows}
-        <form class="row-form" method="post" action="/admin/calendar/filters/${esc(group.id)}/options">
-          <div class="row-line">
-            <div class="field grow"><label for="new-${esc(group.id)}">New option</label>
-              <input id="new-${esc(group.id)}" name="name" type="text" maxlength="40" required placeholder="${main ? "Sports" : "Grade 9"}"></div>
-          </div>
-          ${main ? swatchPicker("colorKey", null, `n-${group.id}`) : ""}
-          <div class="row-line"><button class="primary" type="submit">Add option</button></div>
-        </form>`;
-      if (main) return `<section class="panel">${inner}</section>`;
-      const shown = options.filter((option) => option.active).length;
-      return `<section class="panel group-panel${group.active ? "" : " row-hidden"}">
-        <details class="group-details" data-group-id="${esc(group.id)}">
-          <summary class="group-summary">
-            <span class="group-title"><span class="group-name">${esc(group.name)}</span>
-              <span class="help">${options.length} option${options.length === 1 ? "" : "s"}${options.length !== shown ? ` · ${shown} shown` : ""} · ${group.show_on_site ? "filter row on the site" : "not on the site"}${group.active ? "" : " · inactive"}</span></span>
-            <svg class="chevron" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
-          </summary>
-          <div class="group-body">${inner}</div>
-        </details>
-      </section>`;
+      </li>`;
     })
     .join("");
-  return `<header class="page-head">${eyebrow("Filters")}<h1>How parents filter the year.</h1>
-      <p class="intro">Strand is required on every event and paints its card. Other groups add extra filter rows on the site when shown. An option in use can't be deleted, only hidden.</p></header>
+  const shown = options.filter((option) => option.active).length;
+  const extra = Math.max(0, options.length - OPT_STEP);
+  return `<header class="page-head">${eyebrow("Strands")}<h1>How parents filter the year.</h1>
+      <p class="intro">Every event and rhythm card has one “${esc(group.name)}”. It colours the card and is the filter row on the website. An option in use can’t be deleted — untick Shown to hide it.</p></header>
     ${banner(error, notice)}
-    ${sections}
-    <form class="panel" method="post" action="/admin/calendar/filters/groups">
-      <h2>New group</h2>
-      <div class="row-line mt">
-        <div class="field grow"><label for="new-group">Group name</label>
-          <input id="new-group" name="name" type="text" maxlength="40" required placeholder="House"></div>
-      </div>
-      <div class="row-line mb"><button class="primary" type="submit">Add group</button></div>
-    </form>`;
+    <section class="panel filter-head">
+      <form class="inline-form" method="post" action="/admin/calendar/filters/${gid}">
+        <div class="field grow"><label for="g-${gid}">Group name <span class="muted">(shown as “Filter by …” on the website)</span></label>
+          <input id="g-${gid}" name="name" type="text" maxlength="40" required value="${esc(group.name)}"></div>
+        <button class="secondary" type="submit">Rename</button>
+      </form>
+      <p class="help">${options.length} option${options.length === 1 ? "" : "s"} · ${shown} shown on the site</p>
+    </section>
+    <div class="opt-new-wrap">
+      <form class="opt-card opt-new" method="post" action="/admin/calendar/filters/${gid}/options">
+        <div class="opt-top">
+          <div class="field grow"><label for="new-${gid}">New option</label>
+            <input id="new-${gid}" name="name" type="text" maxlength="40" required placeholder="Sports"></div>
+          <button class="primary opt-add" type="submit">+ Add option</button>
+        </div>
+        <span class="label opt-colour-label">Colour<span class="req" aria-hidden="true">*</span> <span class="muted">(pick one)</span></span>
+        ${swatchPicker("colorKey", null, `n-${group.id}`)}
+      </form>
+    </div>
+    <ul class="opt-grid" id="opt-list">
+      ${cards}
+    </ul>
+    ${extra ? `<button class="secondary more-btn" type="button" data-more="opt-list" data-step="${OPT_STEP}" aria-controls="opt-list">Show more <span class="muted">(<span class="more-count">${extra}</span> more)</span></button>` : ""}`;
 }
 
 // ---- Rhythm ------------------------------------------------------------
@@ -1097,57 +1256,157 @@ function strandSelect(name: string, id: string, strands: FilterRow[], selected: 
     .join("")}</select>`;
 }
 
-export function rhythmBody(cards: RhythmRow[], strands: FilterRow[], error: string, notice: string): string {
-  const rows = cards
-    .map(
-      (card) => `<section class="panel${card.active ? "" : " row-hidden"}">
-      <form method="post" action="/admin/calendar/rhythm/${esc(card.id)}">
-        <div class="field-row">
-          <div class="field"><label for="rs-${esc(card.id)}">Strand</label>${strandSelect("strandId", `rs-${card.id}`, strands, card.strand_id)}</div>
-          <div class="field"><label for="rw-${esc(card.id)}">When</label><input id="rw-${esc(card.id)}" name="whenLabel" type="text" maxlength="40" required value="${esc(card.when_label)}"></div>
+const RHYTHM_STEP = 4;
+
+export function rhythmBody(
+  cards: RhythmRow[],
+  strands: FilterRow[],
+  error: string,
+  notice: string,
+  strandLabel = "Strand",
+  open = "",
+  draft?: Record<string, string>,
+): string {
+  const byId = new Map(strands.map((row) => [row.id, row]));
+  const shown = cards.filter((card) => card.active).length;
+  const n = draft ?? {};
+  // Show the first few cards; the rest open with "Show more". A card being edited is never folded away.
+  const openIndexVisible = cards.findIndex((card) => card.id === open) >= RHYTHM_STEP;
+  const extra = openIndexVisible ? 0 : Math.max(0, cards.length - RHYTHM_STEP);
+  const items = cards
+    .map((card, index) => {
+      const cid = esc(card.id);
+      const strand = byId.get(card.strand_id);
+      const editOpen = open === card.id;
+      const folded = index >= RHYTHM_STEP && !openIndexVisible;
+      return `<li class="r-card${card.active ? "" : " row-hidden"} ${colorClass(strand?.color_key)}" id="r-${cid}"${folded ? " hidden" : ""}>
+        <div class="r-main">
+          ${card.photo ? `<img class="r-thumb" src="${esc(card.photo)}" alt="" width="96" height="72" loading="lazy">` : `<span class="r-thumb blank" aria-hidden="true"></span>`}
+          <div class="r-text">
+            <div class="r-meta">${pill(strand)}<span class="r-when">${esc(card.when_label)}</span>${card.active ? "" : `<span class="state draft">Hidden</span>`}</div>
+            <h3>${esc(card.title)}</h3>
+            <p class="r-body">${esc(card.body)}</p>
+          </div>
         </div>
-        <div class="field"><label for="rt-${esc(card.id)}">Title</label><input id="rt-${esc(card.id)}" name="title" type="text" maxlength="60" required value="${esc(card.title)}"></div>
-        <div class="field"><label for="rb-${esc(card.id)}">Text</label><textarea id="rb-${esc(card.id)}" class="short" name="body" maxlength="300" required rows="3">${esc(card.body)}</textarea></div>
-        <div class="field-row">
-          <div class="field"><label for="rc-${esc(card.id)}">Photo caption</label><input id="rc-${esc(card.id)}" name="caption" type="text" maxlength="60" value="${esc(card.caption)}"></div>
-          <div class="field"><label for="ra-${esc(card.id)}">Photo alt text</label><input id="ra-${esc(card.id)}" name="photoAlt" type="text" maxlength="160" value="${esc(card.photo_alt)}"></div>
+        <div class="r-actions">
+          <button class="secondary sm" type="button" data-edit="${cid}" aria-expanded="${editOpen ? "true" : "false"}" aria-controls="re-${cid}">Edit</button>
+          <form method="post" action="/admin/calendar/rhythm/${cid}/move"><input type="hidden" name="dir" value="up"><button class="secondary sm icon" type="submit" aria-label="Move ${esc(card.title)} up"${index === 0 ? " disabled" : ""}>↑</button></form>
+          <form method="post" action="/admin/calendar/rhythm/${cid}/move"><input type="hidden" name="dir" value="down"><button class="secondary sm icon" type="submit" aria-label="Move ${esc(card.title)} down"${index === cards.length - 1 ? " disabled" : ""}>↓</button></form>
+          <form class="r-delete" method="post" action="/admin/calendar/rhythm/${cid}/delete" data-confirm="Delete the card “${esc(card.title)}”?"><button class="secondary sm danger" type="submit">Delete</button></form>
         </div>
-        <label class="check"><input type="checkbox" name="active"${card.active ? " checked" : ""}> Shown on the site</label>
-        <div class="row-line mt mb">
-          <button class="primary" type="submit">Save card</button>
-          <button class="secondary" type="submit" name="dir" value="up" formaction="/admin/calendar/rhythm/${esc(card.id)}/move" aria-label="Move up">↑</button>
-          <button class="secondary" type="submit" name="dir" value="down" formaction="/admin/calendar/rhythm/${esc(card.id)}/move" aria-label="Move down">↓</button>
-          <button class="secondary danger" type="submit" formaction="/admin/calendar/rhythm/${esc(card.id)}/delete" data-confirm="Delete this card?">Delete</button>
-          ${card.photo ? `<button class="secondary" type="submit" formaction="/admin/calendar/rhythm/${esc(card.id)}/photo/remove" data-confirm="Remove the photo?">Remove photo</button>` : ""}
+        <div class="r-edit" id="re-${cid}"${editOpen ? "" : " hidden"}>
+          <form method="post" action="/admin/calendar/rhythm/${cid}">
+            <div class="r-grid">
+              <div class="field"><label for="rs-${cid}">${esc(strandLabel)}</label>${strandSelect("strandId", `rs-${card.id}`, strands, card.strand_id)}</div>
+              <div class="field"><label for="rw-${cid}">When</label><input id="rw-${cid}" name="whenLabel" type="text" maxlength="40" required value="${esc(card.when_label)}"></div>
+              <div class="field span2"><label for="rt-${cid}">Title</label><input id="rt-${cid}" name="title" type="text" maxlength="60" required value="${esc(card.title)}"></div>
+              <div class="field span2"><label for="rb-${cid}">Text</label><textarea id="rb-${cid}" class="short" name="body" maxlength="300" required rows="3">${esc(card.body)}</textarea></div>
+              <div class="field"><label for="rc-${cid}">Photo caption</label><input id="rc-${cid}" name="caption" type="text" maxlength="60" value="${esc(card.caption)}"></div>
+              <div class="field"><label for="ra-${cid}">Photo alt text</label><input id="ra-${cid}" name="photoAlt" type="text" maxlength="160" value="${esc(card.photo_alt)}"></div>
+            </div>
+            <div class="r-save">
+              <label class="check"><input type="checkbox" name="active"${card.active ? " checked" : ""}> Shown on the site</label>
+              <div class="bar-actions">
+                <button class="secondary sm" type="button" data-edit="${cid}">Close</button>
+                <button class="primary sm" type="submit">Save card</button>
+              </div>
+            </div>
+          </form>
+          <div class="r-photo">
+            <label for="rp-${cid}">${card.photo ? "Replace photo" : "Add a photo"} <span class="muted">(landscape, cropped to 4:3)</span></label>
+            <div class="r-photo-row">
+              <input id="rp-${cid}" class="rhythm-file" type="file" accept="image/jpeg,image/png,image/webp" data-id="${cid}">
+              ${card.photo ? `<form method="post" action="/admin/calendar/rhythm/${cid}/photo/remove" data-confirm="Remove the photo?"><button class="secondary sm" type="submit">Remove photo</button></form>` : ""}
+            </div>
+            <p class="help" role="status"></p>
+          </div>
         </div>
-      </form>
-      <div class="field rhythm-photo">
-        ${card.photo ? `<img src="${esc(card.photo)}" alt="" width="120" height="90" loading="lazy">` : ""}
-        <div><label for="rp-${esc(card.id)}">${card.photo ? "Replace photo" : "Add a photo"} <span class="muted">(optional, landscape 1200 × 800 to 3000 × 2000, cropped to 4:3)</span></label>
-        <input id="rp-${esc(card.id)}" class="rhythm-file" type="file" accept="image/jpeg,image/png,image/webp" data-id="${esc(card.id)}">
-        <p class="help" role="status"></p></div>
-      </div>
-    </section>`,
-    )
+      </li>`;
+    })
     .join("");
-  return `<header class="page-head">${eyebrow("All-year rhythm")}<h1>The parts of the year without a date.</h1></header>
+  const newOpen = open === "new" || !cards.length;
+  return `<header class="page-head r-head">
+      <div>${eyebrow("All-year rhythm")}<h1>The parts of the year without a date.</h1>
+        <p class="intro">${cards.length} card${cards.length === 1 ? "" : "s"} · ${shown} shown on the site. Use ↑ ↓ to set the order parents see.</p></div>
+      <button class="primary" type="button" id="r-new-toggle" aria-expanded="${newOpen ? "true" : "false"}" aria-controls="r-new">+ New card</button>
+    </header>
     ${banner(error, notice)}
-    ${rows}
-    <form class="panel" method="post" action="/admin/calendar/rhythm">
-      <h2>New card</h2>
-      <div class="field-row">
-        <div class="field"><label for="n-strand">Strand</label>${strandSelect("strandId", "n-strand", strands, "")}</div>
-        <div class="field"><label for="n-when">When</label><input id="n-when" name="whenLabel" type="text" maxlength="40" required placeholder="Every morning"></div>
+    <form class="panel r-new" id="r-new" method="post" action="/admin/calendar/rhythm"${newOpen ? "" : " hidden"}>
+      <div class="r-new-head"><h2>New card</h2><span class="help">Add a photo after you save.</span></div>
+      <div class="r-grid four">
+        <div class="field"><label for="n-strand">${esc(strandLabel)}</label>${strandSelect("strandId", "n-strand", strands, n.strandId ?? "")}</div>
+        <div class="field"><label for="n-when">When</label><input id="n-when" name="whenLabel" type="text" maxlength="40" required placeholder="Every morning" value="${esc(n.whenLabel ?? "")}"></div>
+        <div class="field span2"><label for="n-title">Title</label><input id="n-title" name="title" type="text" maxlength="60" required value="${esc(n.title ?? "")}"></div>
+        <div class="field span4"><label for="n-body">Text</label><textarea id="n-body" class="short" name="body" maxlength="300" required rows="2">${esc(n.body ?? "")}</textarea></div>
+        <div class="field span2"><label for="n-caption">Photo caption <span class="muted">(optional)</span></label><input id="n-caption" name="caption" type="text" maxlength="60" value="${esc(n.caption ?? "")}"></div>
+        <div class="field span2"><label for="n-alt">Photo alt text <span class="muted">(optional)</span></label><input id="n-alt" name="photoAlt" type="text" maxlength="160" value="${esc(n.photoAlt ?? "")}"></div>
       </div>
-      <div class="field"><label for="n-title">Title</label><input id="n-title" name="title" type="text" maxlength="60" required></div>
-      <div class="field"><label for="n-body">Text</label><textarea id="n-body" class="short" name="body" maxlength="300" required rows="3"></textarea></div>
-      <div class="field-row">
-        <div class="field"><label for="n-caption">Photo caption</label><input id="n-caption" name="caption" type="text" maxlength="60"></div>
-        <div class="field"><label for="n-alt">Photo alt text</label><input id="n-alt" name="photoAlt" type="text" maxlength="160"></div>
-      </div>
-      <div class="publish-bar"><button class="primary" type="submit">Add card</button></div>
-    </form>`;
+      <div class="r-save"><span></span><div class="bar-actions">
+        ${cards.length ? `<button class="secondary sm" type="button" id="r-new-cancel">Cancel</button>` : ""}
+        <button class="primary sm" type="submit">Add card</button></div></div>
+    </form>
+    ${
+      cards.length
+        ? `<ul class="r-list" id="r-list">${items}</ul>${
+            extra
+              ? `<button class="secondary more-btn" type="button" data-more="r-list" data-step="${RHYTHM_STEP}" aria-controls="r-list">Show more <span class="muted">(<span class="more-count">${extra}</span> more)</span></button>`
+              : ""
+          }`
+        : `<p class="empty-month">No cards yet. Add the first one above.</p>`
+    }`;
 }
+
+export const RHYTHM_SCRIPT = `
+(function () {
+  function toggle(id, force) {
+    var box = document.getElementById("re-" + id);
+    if (!box) return;
+    var show = typeof force === "boolean" ? force : box.hidden;
+    // Only one card is open for editing at a time: opening this one puts the others back as they were.
+    if (show) {
+      Array.prototype.forEach.call(document.querySelectorAll(".r-edit:not([hidden])"), function (other) {
+        if (other !== box) toggle(other.id.replace(/^re-/, ""), false);
+      });
+      showNew(false);
+    }
+    box.hidden = !show;
+    var card = document.getElementById("r-" + id);
+    if (card) card.classList.toggle("is-editing", show);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-edit="' + id + '"][aria-expanded]'), function (b) { b.setAttribute("aria-expanded", show ? "true" : "false"); });
+    if (show) { var first = box.querySelector("select, input, textarea"); if (first) first.focus(); }
+  }
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-edit]");
+    if (button) toggle(button.getAttribute("data-edit"));
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".r-edit:not([hidden])"), function (box) {
+    var card = box.closest(".r-card");
+    if (card) { card.classList.add("is-editing"); card.scrollIntoView({ block: "start" }); }
+  });
+  var newForm = document.getElementById("r-new");
+  var newToggle = document.getElementById("r-new-toggle");
+  function showNew(show) {
+    if (!newForm) return;
+    if (show) Array.prototype.forEach.call(document.querySelectorAll(".r-edit:not([hidden])"), function (other) { toggle(other.id.replace(/^re-/, ""), false); });
+    newForm.hidden = !show;
+    if (newToggle) newToggle.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show) { var f = document.getElementById("n-when"); if (f) f.focus(); }
+  }
+  if (newToggle) newToggle.addEventListener("click", function () { showNew(newForm.hidden); });
+  var cancel = document.getElementById("r-new-cancel");
+  if (cancel) cancel.addEventListener("click", function () { showNew(false); });
+  var hash = window.location.hash.replace(/^#r-/, "");
+  if (hash && /^[0-9a-f-]{36}$/i.test(hash)) {
+    var target = document.getElementById("r-" + hash);
+    if (target && target.hidden) {
+      Array.prototype.forEach.call(document.querySelectorAll("#r-list > li[hidden]"), function (li) { li.hidden = false; });
+      var more = document.querySelector('[data-more="r-list"]');
+      if (more) more.hidden = true;
+    }
+    if (target) { target.classList.add("r-flash"); target.scrollIntoView({ block: "center" }); }
+  }
+})();
+`;
 
 export const UPLOAD_SCRIPT = `
 Array.prototype.forEach.call(document.querySelectorAll("input[type=file][data-url], input.rhythm-file"), function (input) {
@@ -1176,48 +1435,27 @@ Array.prototype.forEach.call(document.querySelectorAll("input[type=file][data-ur
 });
 `;
 
-// ---- Settings ----------------------------------------------------------
+// ---- Settings (theme) --------------------------------------------------
 
-export function settingsBody(
-  year: YearRow,
-  error: string,
-  notice: string,
-  values?: { themeName: string; label: string; seoTitle: string; seoDescription: string; shareImageAlt: string },
-): string {
-  const v = values ?? {
-    themeName: year.theme_name,
-    label: year.label,
-    seoTitle: year.seo_title,
-    seoDescription: year.seo_description,
-    shareImageAlt: year.share_image_alt,
-  };
-  return `<header class="page-head">${eyebrow("Page & SEO")}<h1>The page itself.</h1>
-      <p class="intro">The theme name and year label show in the hero. Search and share text is used for /theme-of-the-year.</p></header>
+export function settingsBody(year: YearRow, error: string, notice: string, values?: { themeName: string }): string {
+  const v = values ?? { themeName: year.theme_name };
+  return `<header class="page-head">${eyebrow("Theme")}<h1>The theme of the year.</h1>
+      <p class="intro">Shown large in the hero of /theme-of-the-year, as “Theme of the Year · ${esc(year.label)}”.</p></header>
     ${banner(error, notice)}
     <form class="panel" method="post" action="/admin/calendar/settings">
-      <div class="field-row">
-        <div class="field"><label for="themeName">Theme name</label><input id="themeName" name="themeName" type="text" maxlength="40" required value="${esc(v.themeName)}"></div>
-        <div class="field"><label for="label">Year label</label><input id="label" name="label" type="text" maxlength="20" required value="${esc(v.label)}"><span class="help">Shown as “Theme of the Year · ${esc(v.label)}”.</span></div>
+      <div class="inline-form">
+        <div class="field grow"><label for="themeName">Theme name</label><input id="themeName" name="themeName" type="text" maxlength="40" required value="${esc(v.themeName)}" placeholder="Roots to Wings"></div>
+        <button class="primary" type="submit">Save</button>
       </div>
-      <div class="field"><label for="seoTitle">Search title</label><input id="seoTitle" name="seoTitle" type="text" maxlength="200" required value="${esc(v.seoTitle)}">${counter("seoTitle", 200, 60)}</div>
-      <div class="field"><label for="seoDescription">Search description</label><textarea id="seoDescription" class="short" name="seoDescription" maxlength="300" required rows="3">${esc(v.seoDescription)}</textarea>${counter("seoDescription", 300, 155)}</div>
-      <div class="google-result">
-        <p class="google-url">wellspringsacademy.in › theme-of-the-year</p>
-        <p class="google-title">${esc(v.seoTitle)}</p>
-        <p class="google-description">${esc(v.seoDescription)}</p>
-      </div>
-      <div class="field mt"><label for="shareImageAlt">Share image alt text</label><input id="shareImageAlt" name="shareImageAlt" type="text" maxlength="160" value="${esc(v.shareImageAlt)}"></div>
-      <div class="publish-bar"><button class="primary" type="submit">Save</button></div>
-    </form>
-    <section class="panel">
-      <h2>Share image</h2>
-      <p class="help">Shown when the page link is shared. Sideways (landscape) photo, from 1200 × 800 up to 3000 × 2000, under 5 MB. Cropped to 1200 × 630. Without one, the hero image is used.</p>
-      ${year.share_image ? `<img class="share-preview" src="${esc(year.share_image)}" alt="" width="1200" height="630">` : ""}
-      <div class="field mt"><label for="share-file">${year.share_image ? "Replace" : "Upload"} share image</label>
-        <input id="share-file" type="file" accept="image/jpeg,image/png,image/webp" data-url="/api/admin/calendar/settings/share-image">
-        <p class="help" role="status"></p></div>
-      ${year.share_image ? `<form method="post" action="/admin/calendar/settings/share-image/remove" data-confirm="Remove the share image?"><button class="secondary danger" type="submit">Remove share image</button></form>` : ""}
+      <p class="help">The year label and months are set on <a href="/admin/calendar/years">Years</a>.</p>
       <div class="spacer"></div>
+    </form>
+    <section class="panel link-panel">
+      <div>
+        <h2>Search &amp; sharing</h2>
+        <p class="help">Google title, description, keywords, canonical link and the share image for /theme-of-the-year now live in one place with the blog’s.</p>
+      </div>
+      <a class="button secondary" href="/admin/site?page=calendar">Open Site &amp; SEO · Calendar</a>
     </section>`;
 }
 
@@ -1234,43 +1472,222 @@ Array.prototype.forEach.call(document.querySelectorAll(".count[data-max]"), func
 
 // ---- Years -------------------------------------------------------------
 
-export function yearsBody(years: YearRow[], working: YearRow | null, error: string, notice: string): string {
-  const rows = years
-    .map(
-      (year) => `<li><div><strong>${esc(year.label)}</strong> · ${esc(year.theme_name)}
-        <div class="when">${esc(monthLong(year.first_month.slice(0, 7)))} – ${esc(monthLong(year.last_month.slice(0, 7)))}${year.is_current ? " · on the site" : ""}${working?.id === year.id ? " · editing" : ""}</div></div>
-        <div class="bar-actions">
-          ${working?.id === year.id ? "" : `<form method="post" action="/admin/calendar/years/${esc(year.id)}/select"><button class="secondary" type="submit">Edit this year</button></form>`}
-          ${year.is_current ? "" : `<form method="post" action="/admin/calendar/years/${esc(year.id)}/current" data-confirm="Make ${esc(year.label)} the year on the site? The other year comes off the site."><button class="primary" type="submit">Make current</button></form>`}
-        </div></li>`,
-    )
-    .join("");
-  const next = suggestNext(working);
-  return `<header class="page-head">${eyebrow("Years")}<h1>One year on the site at a time.</h1>
-      <p class="intro">A new year copies the filters and all-year rhythm cards from the year you are editing. Events are not copied. Old years stay here but are not shown on the site.</p></header>
-    ${banner(error, notice)}
-    <section class="panel"><ul class="todo">${rows || "<li>No years yet.</li>"}</ul><div class="spacer"></div></section>
-    <form class="panel" method="post" action="/admin/calendar/years">
-      <h2>Create the next year</h2>
-      <div class="field-row mt">
-        <div class="field"><label for="y-label">Year label</label><input id="y-label" name="label" type="text" maxlength="20" required value="${esc(next.label)}"></div>
-        <div class="field"><label for="y-theme">Theme name</label><input id="y-theme" name="themeName" type="text" maxlength="40" required value="${esc(working?.theme_name ?? "")}"></div>
-      </div>
-      <div class="field-row">
-        <div class="field"><label for="y-first">First month</label><input id="y-first" name="firstMonth" type="month" required value="${esc(next.first)}"></div>
-        <div class="field"><label for="y-last">Last month</label><input id="y-last" name="lastMonth" type="month" required value="${esc(next.last)}"></div>
-      </div>
-      <div class="publish-bar"><button class="primary" type="submit">Create year</button></div>
-    </form>`;
+function monthOptions(selected: number): string {
+  return MONTH_NAMES.map((name, i) => `<option value="${i + 1}"${i + 1 === selected ? " selected" : ""}>${name}</option>`).join("");
 }
 
-function suggestNext(year: YearRow | null): { label: string; first: string; last: string } {
-  if (!year) return { label: "", first: "", last: "" };
-  const shift = (iso: string): string => `${Number(iso.slice(0, 4)) + 1}${iso.slice(4, 7)}`;
-  const match = year.label.match(/^(\d{4})[–-](\d{2})$/);
-  const label = match ? `${Number(match[1]) + 1}–${String((Number(match[2]) + 1) % 100).padStart(2, "0")}` : "";
-  return { label, first: shift(year.first_month), last: shift(year.last_month) };
+function startYearOptions(selected: number): string {
+  const now = new Date().getFullYear();
+  const from = Math.max(2000, Math.min(now - 5, selected || now));
+  const to = Math.min(2098, Math.max(now + 6, selected || now));
+  let out = "";
+  for (let y = from; y <= to; y++) out += `<option value="${y}"${y === selected ? " selected" : ""}>${y}</option>`;
+  return out;
 }
+
+/** End year choices: the start year up to 5 years after it. */
+function endYearOptions(startYear: number, selected: number): string {
+  let out = "";
+  for (let y = startYear; y <= startYear + 5; y++) out += `<option value="${y}"${y === selected ? " selected" : ""}>${y}</option>`;
+  return out;
+}
+
+/** Last-month choices: from the first month to December of the end year. */
+function lastMonthOptions(startYear: number, endYear: number, startMonth: number, selected: string): string {
+  let out = "";
+  for (let i = startYear * 12 + startMonth - 1; i <= endYear * 12 + 11; i++) {
+    const key = `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, "0")}`;
+    out += `<option value="${key}"${key === selected ? " selected" : ""}>${MONTH_NAMES[i % 12]}</option>`;
+  }
+  return out;
+}
+
+/** Start year · End year (filled in as the next year, editable) · Start month · Last month. */
+function yearFields(prefix: string, d: YearDraft): string {
+  const sy = Number(d.startYear) || new Date().getFullYear();
+  const eyRaw = Number(d.endYear);
+  const ey = eyRaw >= sy && eyRaw <= sy + 5 ? eyRaw : sy + 1;
+  const sm = Number(d.startMonth) || 4;
+  return `<div class="field"><label for="${prefix}-sy">Start year</label><select id="${prefix}-sy" class="y-start-year" name="startYear">${startYearOptions(sy)}</select></div>
+        <div class="field"><label for="${prefix}-ey">End year</label><select id="${prefix}-ey" class="y-end-year" name="endYear">${endYearOptions(sy, ey)}</select></div>
+        <div class="field"><label for="${prefix}-sm">Start month</label><select id="${prefix}-sm" class="y-start" name="startMonth">${monthOptions(sm)}</select></div>
+        <div class="field"><label for="${prefix}-lm">Last month</label><select id="${prefix}-lm" class="y-last" name="lastMonth">${lastMonthOptions(sy, ey, sm, d.lastMonth)}</select></div>`;
+}
+
+function draftOf(year: YearRow): YearDraft {
+  return {
+    startYear: year.first_month.slice(0, 4),
+    endYear: year.last_month.slice(0, 4),
+    startMonth: String(Number(year.first_month.slice(5, 7))),
+    lastMonth: year.last_month.slice(0, 7),
+    themeName: year.theme_name,
+  };
+}
+
+function spanText(first: string, last: string): string {
+  return `${monthLong(first.slice(0, 7))} → ${monthLong(last.slice(0, 7))}`;
+}
+
+export type YearDraft = { startYear: string; endYear: string; startMonth: string; lastMonth: string; themeName: string };
+
+export function yearsBody(
+  years: YearRow[],
+  working: YearRow | null,
+  error: string,
+  notice: string,
+  options: {
+    draft?: YearDraft;
+    editId?: string;
+    editDraft?: YearDraft;
+    deleteId?: string;
+    usage?: Map<string, { events: number; rhythm: number }>;
+  } = {},
+): string {
+  const next = suggestNext(years[0] ?? working);
+  const draft = options.draft ?? { ...next, themeName: working?.theme_name ?? "" };
+  const rows = years
+    .map((year) => {
+      const id = esc(year.id);
+      const editing = options.editId === year.id;
+      const ed = editing && options.editDraft ? options.editDraft : draftOf(year);
+      return `<li class="y-row${working?.id === year.id ? " is-working" : ""}">
+        <div class="y-info">
+          <div class="y-title"><strong>${esc(year.label)}</strong><span class="y-theme">${esc(year.theme_name)}</span>
+            ${year.is_current ? `<span class="state completed">On the site</span>` : ""}${working?.id === year.id ? `<span class="state upcoming">Editing</span>` : ""}</div>
+          <div class="when">${esc(spanText(year.first_month, year.last_month))} · ${monthKeys(year.first_month, year.last_month).length} months</div>
+        </div>
+        <div class="bar-actions">
+          <button class="secondary sm" type="button" data-year-edit="${id}" aria-expanded="${editing ? "true" : "false"}" aria-controls="ye-${id}">Change months</button>
+          ${working?.id === year.id ? "" : `<form method="post" action="/admin/calendar/years/${id}/select"><button class="secondary sm" type="submit">Edit this year</button></form>`}
+          ${year.is_current ? "" : `<form method="post" action="/admin/calendar/years/${id}/current" data-confirm="Make ${esc(year.label)} the year on the site? The other year comes off the site."><button class="primary sm" type="submit">Make current</button></form>`}
+          ${year.is_current ? "" : `<button class="secondary sm danger" type="button" data-year-delete="${id}" aria-expanded="${options.deleteId === year.id ? "true" : "false"}" aria-controls="yd-${id}">Delete</button>`}
+        </div>
+        ${
+          year.is_current
+            ? ""
+            : `<form class="y-delete" id="yd-${id}" method="post" action="/admin/calendar/years/${id}/delete"${options.deleteId === year.id ? "" : " hidden"}>
+          <p><strong>Delete ${esc(year.label)} for good?</strong> This removes ${(() => {
+            const u = options.usage?.get(year.id) ?? { events: 0, rhythm: 0 };
+            return `${u.events} event${u.events === 1 ? "" : "s"} (with their photos), ${u.rhythm} rhythm card${u.rhythm === 1 ? "" : "s"}, its filters and its search details`;
+          })()}. It cannot be undone.</p>
+          <div class="field"><label for="ydc-${id}">Type <code>${esc(year.label)}</code> to confirm</label>
+            <input id="ydc-${id}" name="confirmLabel" type="text" maxlength="20" autocomplete="off" required></div>
+          <button class="secondary sm" type="button" data-year-delete="${id}">Keep it</button>
+          <button class="primary sm danger-fill" type="submit">Delete year</button>
+        </form>`
+        }
+        <form class="y-edit year-form" id="ye-${id}" method="post" action="/admin/calendar/years/${id}/span"${editing ? "" : " hidden"}>
+          ${yearFields(`ye-${id}`, ed)}
+          <div class="field y-span"><span class="label">Runs</span><p class="y-preview" aria-live="polite"></p></div>
+          <button class="primary sm" type="submit">Save months</button>
+          <p class="help y-wide">Every event must stay inside the new months. Month lines for months that drop out are kept, in case you change back.</p>
+        </form>
+      </li>`;
+    })
+    .join("");
+  return `<header class="page-head">${eyebrow("Years")}<h1>One year on the site at a time.</h1>
+      <p class="intro">A new year copies the filters and all-year rhythm cards from the year you are editing. Events are not copied. Old years with events stay listed for parents under “Year” on the website.</p></header>
+    ${banner(error, notice)}
+    <form class="panel year-create year-form" method="post" action="/admin/calendar/years">
+      <div class="y-create-head"><h2>Create the next year</h2><span class="help">Pick the start year (the end year follows), then the first and last month.</span></div>
+      <div class="y-create-row">
+        ${yearFields("y", draft)}
+        <div class="field grow"><label for="y-theme">Theme name</label><input id="y-theme" name="themeName" type="text" maxlength="40" required value="${esc(draft.themeName)}"></div>
+        <button class="primary" type="submit">Create year</button>
+      </div>
+      <p class="y-preview y-create-preview" aria-live="polite"></p>
+    </form>
+    <section class="panel"><h2 class="y-list-head">All years</h2><ul class="y-list">${rows || "<li>No years yet.</li>"}</ul><div class="spacer"></div></section>`;
+}
+
+/** The year after the newest one: same start month, 12 months by default (the admin can change it). */
+function suggestNext(year: YearRow | null): { startYear: string; endYear: string; startMonth: string; lastMonth: string } {
+  const startYear = year ? Number(year.first_month.slice(0, 4)) + 1 : new Date().getFullYear();
+  const startMonth = year ? Number(year.first_month.slice(5, 7)) : 4;
+  const end = startYear * 12 + startMonth - 1 + 11;
+  return {
+    startYear: String(startYear),
+    endYear: String(startYear + 1),
+    startMonth: String(startMonth),
+    lastMonth: `${Math.floor(end / 12)}-${String((end % 12) + 1).padStart(2, "0")}`,
+  };
+}
+
+export const YEARS_SCRIPT = `
+(function () {
+  var MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  // Start year -> End year is set to the next year (the admin can still change it).
+  // Last month: from the first month to December of the end year.
+  function preview(form, changed) {
+    var sy = form.querySelector(".y-start-year");
+    var ey = form.querySelector(".y-end-year");
+    var start = form.querySelector(".y-start");
+    var last = form.querySelector(".y-last");
+    var out = form.querySelector(".y-preview");
+    if (!sy || !start || !last) return;
+    var y = Number(sy.value);
+    var month = Number(start.value);
+    var endY = ey ? Number(ey.value) : y + 1;
+    if (ey && (changed === sy || endY < y || endY > y + 5)) {
+      endY = y + 1;
+      var years = "";
+      for (var k = y; k <= y + 5; k++) years += '<option value="' + k + '">' + k + "</option>";
+      ey.innerHTML = years;
+      ey.value = String(endY);
+    }
+    var keep = last.value;
+    var from = y * 12 + month - 1;
+    var to = endY * 12 + 11;
+    var html = "";
+    for (var i = from; i <= to; i++) {
+      var key = Math.floor(i / 12) + "-" + String((i % 12) + 1).padStart(2, "0");
+      html += '<option value="' + key + '">' + MONTHS[i % 12] + "</option>";
+    }
+    last.innerHTML = html;
+    if (keep && keep >= last.options[0].value && keep <= last.options[last.options.length - 1].value) last.value = keep;
+    else last.selectedIndex = Math.min(11, last.options.length - 1);
+    if (!out) return;
+    var n = last.selectedIndex + 1;
+    out.classList.remove("warn");
+    out.textContent = MONTHS[month - 1] + " " + y + " → " + last.options[last.selectedIndex].text + " " + last.value.slice(0, 4) + " · " + n + " month" + (n === 1 ? "" : "s") + " · saved as " + (endY === y ? String(y) : y + "–" + String(endY % 100).padStart(2, "0"));
+  }
+  Array.prototype.forEach.call(document.querySelectorAll(".year-form"), function (form) {
+    form.addEventListener("change", function (event) { preview(form, event.target); });
+    preview(form);
+  });
+  // One year panel open at a time: opening "Change months" or "Delete" on a card closes any other.
+  function closeOthers(keep) {
+    Array.prototype.forEach.call(document.querySelectorAll('[id^="ye-"]:not([hidden]), [id^="yd-"]:not([hidden])'), function (panel) {
+      if (panel === keep) return;
+      panel.hidden = true;
+      var id = panel.id.slice(3);
+      var attr = panel.id.indexOf("ye-") === 0 ? "data-year-edit" : "data-year-delete";
+      Array.prototype.forEach.call(document.querySelectorAll("[" + attr + '="' + id + '"][aria-expanded]'), function (x) { x.setAttribute("aria-expanded", "false"); });
+    });
+  }
+  document.addEventListener("click", function (event) {
+    var d = event.target.closest && event.target.closest("[data-year-delete]");
+    if (d) {
+      var form = document.getElementById("yd-" + d.getAttribute("data-year-delete"));
+      if (form) {
+        if (form.hidden) closeOthers(form);
+        form.hidden = !form.hidden;
+        Array.prototype.forEach.call(document.querySelectorAll('[data-year-delete="' + d.getAttribute("data-year-delete") + '"][aria-expanded]'), function (x) { x.setAttribute("aria-expanded", form.hidden ? "false" : "true"); });
+        if (!form.hidden) form.querySelector("input").focus();
+      }
+      return;
+    }
+    var b = event.target.closest && event.target.closest("[data-year-edit]");
+    if (!b) return;
+    var box = document.getElementById("ye-" + b.getAttribute("data-year-edit"));
+    if (!box) return;
+    if (box.hidden) closeOthers(box);
+    box.hidden = !box.hidden;
+    b.setAttribute("aria-expanded", box.hidden ? "false" : "true");
+    if (!box.hidden) { var f = box.querySelector("input"); if (f) f.focus(); }
+  });
+})();
+`;
 
 export function noYearBody(): string {
   return `<header class="page-head">${eyebrow("Calendar")}<h1>No calendar year yet.</h1>

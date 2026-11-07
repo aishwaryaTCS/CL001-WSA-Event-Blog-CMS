@@ -26,7 +26,10 @@ export function mountPublic(app: Express): void {
     try {
       const slug = String(req.params.slug);
       const rows = (await listVisible()).filter((row) => row.slug && row.pillar);
-      const post = rows.find((row) => row.slug === slug);
+      // "<uid>-<title>": found by its unique id, so a link still works after the title changes.
+      // Older links without the id are still found by their slug.
+      const uid = /^([a-f0-9]{8})-/.exec(slug)?.[1];
+      const post = (uid ? rows.find((row) => row.uid === uid) : undefined) ?? rows.find((row) => row.slug === slug);
       if (!post) {
         res.status(404).json({ error: COPY.notFound });
         return;

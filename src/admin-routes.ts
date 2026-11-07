@@ -345,7 +345,8 @@ async function attemptLogin(req: Request): Promise<{ ok: true; admin: Admin } | 
   const parsed = loginSchema.safeParse(req.body);
   const email = parsed.success ? parsed.data.email.trim().toLowerCase().slice(0, 254) : "";
   const password = parsed.success ? parsed.data.password.slice(0, 200) : "";
-  const key = loginKey(email, req.socket.remoteAddress);
+  // req.ip is the visitor's address, also behind Nginx (see "trust proxy" in index.ts).
+  const key = loginKey(email, req.ip);
   if (!loginAllowed(key)) return { ok: false, status: 429, error: COPY.wait };
   const admin = email.includes("@") ? await adminByEmail(email) : null;
   const match = await checkPassword(admin?.password_hash ?? null, password);
@@ -393,8 +394,7 @@ async function writeNote(req: Request, res: Response, id: string | null, source:
     return;
   }
   let input = parsed.value;
-  if (existing?.slug_locked) input = { ...input, slug: existing.slug };
-  if (input.slug && !existing?.slug_locked && (await slugTaken(input.slug, existing?.id ?? null))) {
+  if (input.slug && (await slugTaken(input.slug, existing?.id ?? null))) {
     await rejectWrite(req, res, source, existing, COPY.slugTaken, 409);
     return;
   }
@@ -423,7 +423,7 @@ async function writeNote(req: Request, res: Response, id: string | null, source:
     }
   }
   try {
-    const saved = await saveNote(existing?.id ?? null, input, existing?.slug_locked ? existing.slug : null, size);
+    const saved = await saveNote(existing?.id ?? null, input, null, size);
     if (existing?.cover_image && existing.cover_image !== saved.cover_image) await removeCover(existing.cover_image);
     if (source === "json") {
       res.status(existing ? 200 : 201).json(toAdmin(saved));

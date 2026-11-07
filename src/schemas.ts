@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readSeoExtras } from "./seo-fields.ts";
 
 export const CARD_TITLE_CHARS = 70;
 export const CARD_EXCERPT_CHARS = 160;
@@ -139,6 +140,11 @@ export type NoteInput = {
   nameConsent: boolean;
   seoTitle: string | null;
   seoDescription: string | null;
+  seoKeywords: string;
+  seoCanonical: string;
+  seoNoindex: boolean;
+  seoSchemaType: string;
+  seoSchemaJson: string;
   coverImage: string | null;
   status: NoteStatus;
 };
@@ -461,6 +467,9 @@ export function noteFromBody(
     return { ok: false, error: COPY.seoDescriptionCap };
   }
 
+  const extras = readSeoExtras(data, { canonical: true, author: false, kind: "note" });
+  if (!extras.ok) return { ok: false, error: extras.error };
+
   let bodyText = "";
   if (typeof data.bodyText === "string") bodyText = data.bodyText;
   else if (typeof data.body === "string") bodyText = data.body;
@@ -518,6 +527,11 @@ export function noteFromBody(
     nameConsent,
     seoTitle: seoResolved.seoTitle,
     seoDescription: seoResolved.seoDescription,
+    seoKeywords: extras.value.keywords,
+    seoCanonical: extras.value.canonical,
+    seoNoindex: extras.value.noindex,
+    seoSchemaType: extras.value.schemaType,
+    seoSchemaJson: extras.value.schemaJson,
     coverImage: coverRaw || null,
     status,
   };

@@ -3,11 +3,17 @@ import { seoIsAutomatic } from "./schemas.ts";
 
 const PILLAR_LABEL = { think: "Think", build: "Build", belong: "Belong" } as const;
 
+/** "<uid>-<slug>" as used in /blog/… links (null while the note has no URL yet). */
+export function publicSlug(row: Pick<NoteRow, "uid" | "slug">): string | null {
+  return row.slug ? (row.uid ? `${row.uid}-${row.slug}` : row.slug) : null;
+}
+
 export function toPublic(row: NoteRow, featured: boolean) {
   return {
     id: row.id,
     title: row.title,
-    slug: row.slug,
+    // Public link: the unique id goes before the title, so two notes never share a URL.
+    slug: publicSlug(row),
     excerpt: row.excerpt,
     body: row.body,
     pillar: row.pillar ? PILLAR_LABEL[row.pillar] : null,
@@ -22,12 +28,19 @@ export function toPublic(row: NoteRow, featured: boolean) {
     featured,
     seoTitle: row.seo_title,
     seoDescription: row.seo_description,
+    seoKeywords: row.seo_keywords,
+    seoCanonical: row.seo_canonical,
+    seoRobots: row.seo_noindex ? "noindex, nofollow" : "index, follow",
+    seoSchemaType: row.seo_schema_type,
+    seoSchemaJson: row.seo_schema_json,
   };
 }
 
 export function toAdmin(row: NoteRow) {
   return {
     ...toPublic(row, row.featured),
+    slug: row.slug,
+    uid: row.uid,
     includesStudent: row.includes_student,
     photoConsent: row.photo_consent,
     nameConsent: row.name_consent,

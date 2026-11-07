@@ -82,6 +82,10 @@ async function main(): Promise<void> {
 
   const app = express();
   app.disable("x-powered-by");
+  // Live, Nginx on the same server passes requests on. Trust its X-Forwarded-For (only from
+  // this machine), so req.ip is the visitor's own address: the sign-in lockout then counts
+  // each person separately instead of everyone as 127.0.0.1. Without a proxy nothing changes.
+  app.set("trust proxy", "loopback");
   app.use(cookieParser(process.env.COOKIE_SECRET));
   app.use(express.urlencoded({ extended: false, limit: "100kb" }));
   app.use(express.json({ limit: "100kb" }));
@@ -90,8 +94,12 @@ async function main(): Promise<void> {
     res.setHeader("Referrer-Policy", "same-origin");
     res.setHeader("X-Frame-Options", "DENY");
     if (req.path.startsWith("/admin") || req.path.startsWith("/api/admin")) {
-      res.setHeader("X-Robots-Tag", "noindex");
       res.setHeader("Cache-Control", "no-store");
+    }
+    // The CMS itself must never appear in search results (the sign-in page included).
+    // Only the photos the website shows stay indexable.
+    if (!req.path.startsWith("/api/uploads/") && !req.path.startsWith("/api/calendar/photos/")) {
+      res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
     }
     next();
   });
@@ -136,9 +144,12 @@ async function main(): Promise<void> {
   });
 
   const port = Number(process.env.PORT || 3002);
-  app.listen(port, () => {
-    console.log(`Listening on ${port}`);
-  });
+  // HOST=127.0.0.1 on the server: only Nginx (same machine) can reach the CMS, so nobody
+  // can skip HTTPS by opening :3002 directly. Not set: listens everywhere, as before.
+  const host = (process.env.HOST ?? "").trim();
+  const ready = () => console.log(`Listening on ${host ? `${host}:` : ""}${port}`);
+  if (host) app.listen(port, host, ready);
+  else app.listen(port, ready);
 }
 
 main().catch((error: unknown) => {

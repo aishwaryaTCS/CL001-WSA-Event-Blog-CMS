@@ -14,6 +14,12 @@ export type YearRow = {
   seo_description: string;
   share_image: string | null;
   share_image_alt: string;
+  seo_keywords: string;
+  seo_canonical: string;
+  seo_noindex: boolean;
+  seo_author: string;
+  seo_schema_type: string;
+  seo_schema_json: string;
   updated_at: Date;
 };
 
@@ -32,6 +38,7 @@ export type FilterRow = {
 export type EventRow = {
   id: string;
   year_id: string;
+  uid: string;
   slug: string;
   slug_locked: boolean;
   title: string;
@@ -49,6 +56,11 @@ export type EventRow = {
   photo_consent: boolean;
   seo_title: string;
   seo_description: string;
+  seo_keywords: string;
+  seo_noindex: boolean;
+  seo_canonical: string;
+  seo_schema_type: string;
+  seo_schema_json: string;
   status: EventStatus;
   updated_at: Date;
 };
@@ -122,15 +134,101 @@ export async function yearCount(): Promise<number> {
   return Number(result.rows[0]?.n ?? 0);
 }
 
-export async function updateYearSettings(
+export async function updateYearTheme(id: string, themeName: string): Promise<void> {
+  await getPool().query("update cal_years set theme_name = $2, updated_at = now() where id = $1", [id, themeName]);
+}
+
+export async function updateYearSeo(
   id: string,
-  values: { label: string; themeName: string; seoTitle: string; seoDescription: string; shareImageAlt: string },
+  values: {
+    seoTitle: string;
+    seoDescription: string;
+    shareImageAlt: string;
+    keywords: string;
+    canonical: string;
+    noindex: boolean;
+    author: string;
+    schemaType: string;
+    schemaJson: string;
+  },
 ): Promise<void> {
   await getPool().query(
-    `update cal_years set label = $2, theme_name = $3, seo_title = $4, seo_description = $5,
-       share_image_alt = $6, updated_at = now() where id = $1`,
-    [id, values.label, values.themeName, values.seoTitle, values.seoDescription, values.shareImageAlt],
+    `update cal_years set seo_title = $2, seo_description = $3, share_image_alt = $4,
+       seo_keywords = $5, seo_canonical = $6, seo_noindex = $7, seo_author = $8,
+       seo_schema_type = $9, seo_schema_json = $10, updated_at = now()
+     where id = $1`,
+    [
+      id,
+      values.seoTitle,
+      values.seoDescription,
+      values.shareImageAlt,
+      values.keywords,
+      values.canonical,
+      values.noindex,
+      values.author,
+      values.schemaType,
+      values.schemaJson,
+    ],
   );
+}
+
+/** How much a year holds, for the delete confirmation. */
+export async function yearUsage(id: string): Promise<{ events: number; rhythm: number }> {
+  const result = await getPool().query<{ events: string; rhythm: string }>(
+    `select (select count(*) from cal_events where year_id = $1)::text as events,
+            (select count(*) from cal_rhythm where year_id = $1)::text as rhythm`,
+    [id],
+  );
+  return { events: Number(result.rows[0]?.events ?? 0), rhythm: Number(result.rows[0]?.rhythm ?? 0) };
+}
+
+/**
+ * Deletes a year that is not on the site, with its events, photos, filters and rhythm cards.
+ * Returns the photo paths it held (the caller removes files nothing else uses), or a reason.
+ */
+export async function deleteYear(id: string): Promise<{ ok: true; paths: string[] } | { ok: false; reason: "missing" | "current" }> {
+  return withTx(async (client) => {
+    const locked = await client.query<YearRow>("select * from cal_years where id = $1 for update", [id]);
+    const year = locked.rows[0];
+    if (!year) return { ok: false, reason: "missing" };
+    if (year.is_current) return { ok: false, reason: "current" };
+    const photos = await client.query<{ file: string; thumb: string }>(
+      "select p.file, p.thumb from cal_photos p join cal_events e on e.id = p.event_id where e.year_id = $1",
+      [id],
+    );
+    const rhythm = await client.query<{ photo: string | null }>("select photo from cal_rhythm where year_id = $1", [id]);
+    // Children first: events and rhythm cards point at filters, options point at groups.
+    await client.query("delete from cal_events where year_id = $1", [id]);
+    await client.query("delete from cal_rhythm where year_id = $1", [id]);
+    await client.query("delete from cal_filters where year_id = $1 and parent_id is not null", [id]);
+    await client.query("delete from cal_filters where year_id = $1", [id]);
+    await client.query("delete from cal_years where id = $1", [id]);
+    const paths = [
+      ...photos.rows.flatMap((row) => [row.file, row.thumb]),
+      ...rhythm.rows.map((row) => row.photo).filter((path): path is string => Boolean(path)),
+      ...(year.share_image ? [year.share_image] : []),
+    ];
+    return { ok: true, paths };
+  });
+}
+
+/** Changes a year's label and months. The caller checks that no event falls outside them. */
+export async function updateYearSpan(id: string, values: { label: string; firstMonth: string; lastMonth: string }): Promise<void> {
+  await getPool().query(
+    "update cal_years set label = $2, first_month = $3, last_month = $4, updated_at = now() where id = $1",
+    [id, values.label, `${values.firstMonth}-01`, `${values.lastMonth}-01`],
+  );
+}
+
+/** Every year parents can pick on the website, newest first. Only published events ever show. */
+export async function publicYears(): Promise<YearRow[]> {
+  const result = await getPool().query<YearRow>("select * from cal_years order by first_month desc");
+  return result.rows;
+}
+
+export async function yearByLabel(label: string): Promise<YearRow | null> {
+  const result = await getPool().query<YearRow>("select * from cal_years where label = $1", [label]);
+  return result.rows[0] ?? null;
 }
 
 export async function updateMonthLines(id: string, lines: Record<string, string>): Promise<void> {
@@ -358,7 +456,7 @@ export async function uniqueSlug(client: Db, yearId: string, base: string, excep
   throw new Error("No free slug.");
 }
 
-export type EventWrite = Omit<EventRow, "id" | "updated_at">;
+export type EventWrite = Omit<EventRow, "id" | "uid" | "updated_at">;
 
 const EVENT_COLUMNS = [
   "year_id",
@@ -379,6 +477,11 @@ const EVENT_COLUMNS = [
   "photo_consent",
   "seo_title",
   "seo_description",
+  "seo_keywords",
+  "seo_noindex",
+  "seo_canonical",
+  "seo_schema_type",
+  "seo_schema_json",
   "status",
 ] as const;
 
@@ -476,13 +579,14 @@ export async function rhythmById(id: string): Promise<RhythmRow | null> {
 export async function insertRhythm(
   yearId: string,
   values: { strandId: string; whenLabel: string; title: string; body: string; caption: string; photoAlt: string },
-): Promise<void> {
+): Promise<string> {
   const sort = await nextSort("cal_rhythm", "year_id = $1", [yearId]);
-  await getPool().query(
+  const result = await getPool().query<{ id: string }>(
     `insert into cal_rhythm (year_id, strand_id, when_label, title, body, caption, photo_alt, sort)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+     values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
     [yearId, values.strandId, values.whenLabel, values.title, values.body, values.caption, values.photoAlt, sort],
   );
+  return result.rows[0].id;
 }
 
 export async function updateRhythm(
