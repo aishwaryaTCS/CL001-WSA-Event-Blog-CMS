@@ -112,6 +112,11 @@ class Rejection extends Error {
 // ---- Shared helpers ----------------------------------------------------
 
 const MONTH_LABEL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** Consent is needed only when a person's photo or name is shown; then both ticks are. */
+function consentOk(input: { includesPeople: boolean; photoConsent: boolean; nameConsent: boolean }): boolean {
+  return !input.includesPeople || (input.photoConsent && input.nameConsent);
+}
+
 function monthName(iso: string): string {
   return `${MONTH_LABEL[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
 }
@@ -189,8 +194,9 @@ const NOTICES: Record<string, string> = {
   cancelled: CAL_COPY.cancelled,
   "recap-published": CAL_COPY.recapPublished,
   "recap-unpublished": CAL_COPY.recapUnpublished,
-  photos: "Photos added. Check the alt text, tick consent and publish the recap.",
-  "photos-recap": "Photos added. The recap is hidden until you tick consent and publish it again.",
+  "recap-deleted": CAL_COPY.recapDeleted,
+  photos: "Photos added. Check the alt text and consent, then publish the recap.",
+  "photos-recap": "Photos added. The recap is hidden until you check the photos (and consent, if a person is shown) and publish it again.",
   "recap-hidden": "The last photo was deleted, so the recap is hidden.",
   photo: "Photo saved.",
   deleted: "Deleted.",
@@ -282,7 +288,7 @@ async function saveEvent(existingId: string | null, year: YearRow, input: EventI
         if (input.startDate > today) throw new Rejection(CAL_COPY.recapEarly);
         const count = (await photosForEvent(existing.id, client)).length;
         if (count < 1) throw new Rejection(CAL_COPY.recapPhotos);
-        if (!input.photoConsent) throw new Rejection(CAL_COPY.recapConsent);
+        if (!consentOk(input)) throw new Rejection(CAL_COPY.recapConsent);
         recapPublished = true;
         notice = "recap-published";
         break;
@@ -297,7 +303,7 @@ async function saveEvent(existingId: string | null, year: YearRow, input: EventI
     }
     if (status === "published" && !input.body) throw new Rejection(CAL_COPY.bodyRequired);
     // A recap stays public only while every rule still holds.
-    if (recapPublished && (!input.photoConsent || status !== "published" || input.startDate > today)) recapPublished = false;
+    if (recapPublished && (!consentOk(input) || status !== "published" || input.startDate > today)) recapPublished = false;
 
     // The pop-up link: the admin may type their own. Otherwise it follows the date and title
     // until the first publish, then stays so shared links keep working.
@@ -341,7 +347,9 @@ async function saveEvent(existingId: string | null, year: YearRow, input: EventI
       highlights: input.highlights,
       recap: input.recap,
       recap_published: recapPublished,
+      includes_people: input.includesPeople,
       photo_consent: input.photoConsent,
+      name_consent: input.nameConsent,
       seo_title: input.seoTitle || autoEventSeoTitle(input.title, year.theme_name),
       seo_description: input.seoDescription || autoEventSeoDescription(input.subtitle, input.body),
       seo_keywords: input.seoKeywords,
@@ -566,6 +574,40 @@ export function mountCalendarAdmin(app: Express): void {
     }
   });
 
+  // Delete recap: removes the recap text, all its photos and the consent ticks. The event's own
+  // fields (plan, dates, status, SEO) are not touched, so a published event stays published.
+  app.post("/admin/calendar/events/:id/recap/delete", requireAdmin, async (req, res, next) => {
+    try {
+      const id = idParam(req.params.id);
+      if (!id) {
+        res.redirect("/admin/calendar/events");
+        return;
+      }
+      const files = await withTx(async (client) => {
+        const event = await lockEvent(client, id);
+        if (!event) return null;
+        const removed = await client.query<{ file: string; thumb: string }>(
+          "delete from cal_photos where event_id = $1 returning file, thumb",
+          [id],
+        );
+        await client.query(
+          `update cal_events set recap = '', recap_published = false, photo_consent = false, name_consent = false,
+             updated_at = now() where id = $1`,
+          [id],
+        );
+        return removed.rows.flatMap((row) => [row.file, row.thumb]);
+      });
+      if (!files) {
+        res.redirect("/admin/calendar/events");
+        return;
+      }
+      if (files.length) await removeUnreferenced(files);
+      res.redirect(`/admin/calendar/events/${id}?tab=after&notice=recap-deleted`);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/admin/calendar/events/:id/preview", requireAdmin, async (req, res, next) => {
     try {
       const id = idParam(req.params.id);
@@ -611,7 +653,7 @@ export function mountCalendarAdmin(app: Express): void {
           [event.id, saved.file, saved.thumb, saved.width, saved.height, `Photo from ${locked.title}`.slice(0, 160), count.rows[0].next],
         );
         // A new photo has not been checked for consent yet.
-        await client.query("update cal_events set photo_consent = false, recap_published = false, updated_at = now() where id = $1", [event.id]);
+        await client.query("update cal_events set photo_consent = false, name_consent = false, recap_published = false, updated_at = now() where id = $1", [event.id]);
         return { full: false, gone: false, id: inserted.rows[0].id, recapHidden: locked.recap_published } as const;
       });
       if (result.full || result.gone) {

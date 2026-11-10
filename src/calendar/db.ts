@@ -53,7 +53,9 @@ export type EventRow = {
   highlights: string[];
   recap: string;
   recap_published: boolean;
+  includes_people: boolean;
   photo_consent: boolean;
+  name_consent: boolean;
   seo_title: string;
   seo_description: string;
   seo_keywords: string;
@@ -474,7 +476,9 @@ const EVENT_COLUMNS = [
   "highlights",
   "recap",
   "recap_published",
+  "includes_people",
   "photo_consent",
+  "name_consent",
   "seo_title",
   "seo_description",
   "seo_keywords",

@@ -11,7 +11,7 @@ export function mountPublic(app: Express): void {
       const rows = (await listVisible()).filter((row) => row.slug && row.pillar);
       const featured = rows.find((row) => row.featured) ?? null;
       const page = await publicSitePage("blog");
-      res.setHeader("Cache-Control", "public, max-age=60");
+      res.setHeader("Cache-Control", "no-cache"); // always fresh: a CMS edit shows on the next refresh
       res.json({
         featured: featured ? toPublic(featured, true) : null,
         posts: rows.filter((row) => row !== featured).map((row) => toPublic(row, false)),
@@ -34,7 +34,7 @@ export function mountPublic(app: Express): void {
         res.status(404).json({ error: COPY.notFound });
         return;
       }
-      res.setHeader("Cache-Control", "public, max-age=60");
+      res.setHeader("Cache-Control", "no-cache"); // always fresh: a CMS edit shows on the next refresh
       res.json({
         post: toPublic(post, post.featured),
         more: rows.filter((row) => row.id !== post.id).slice(0, 2).map((row) => toPublic(row, false)),

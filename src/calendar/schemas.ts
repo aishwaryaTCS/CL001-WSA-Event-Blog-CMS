@@ -36,7 +36,7 @@ export const CAL_COPY = {
   highlightCap: "Each point must be 140 characters or fewer.",
   recapEarly: "The recap can be published on or after the event's start date.",
   recapPhotos: "Add at least one photo before publishing the recap.",
-  recapConsent: "Tick photo consent before publishing the recap.",
+  recapConsent: "A person's photo or name is shown: tick Photo is allowed and Names are allowed before publishing the recap.",
   recapNotPublished: "Publish the event before publishing its recap.",
   photosFull: "6 photos per event.",
   photoRejected: "Photo must be a JPEG, PNG, or WebP under 5 MB.",
@@ -56,6 +56,7 @@ export const CAL_COPY = {
   cancelled: "Cancelled. It shows on the site as cancelled.",
   recapPublished: "Recap published.",
   recapUnpublished: "Recap hidden. The photos are kept.",
+  recapDeleted: "Recap deleted. The event is unchanged.",
   notFound: "Not found.",
 } as const;
 
@@ -175,7 +176,10 @@ export type EventInput = {
   body: string;
   highlights: string[];
   recap: string;
+  /** A person's photo or name is shown (child, teacher or staff): only then are the two consent ticks needed. */
+  includesPeople: boolean;
   photoConsent: boolean;
+  nameConsent: boolean;
   showMoved: boolean;
   seoTitle: string;
   seoDescription: string;
@@ -213,7 +217,9 @@ export function eventFormValues(body: unknown): EventInput {
       .map((line) => line.replace(/^\s*[-•*]\s*/, "").trim())
       .filter(Boolean),
     recap: text(source.recap).trim(),
-    photoConsent: tick(source.photoConsent),
+    includesPeople: tick(source.includesPeople),
+    photoConsent: tick(source.includesPeople) && tick(source.photoConsent),
+    nameConsent: tick(source.includesPeople) && tick(source.nameConsent),
     showMoved: tick(source.showMoved),
     seoTitle: text(source.seoTitle).trim(),
     seoDescription: text(source.seoDescription).trim(),

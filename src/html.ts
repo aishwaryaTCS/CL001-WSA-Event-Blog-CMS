@@ -906,14 +906,14 @@ export function editorPage(form: EditorForm, error: string, notice: string, nonc
         ${eyebrow("Before you publish")}
         <label class="check switch">
           <input id="includesStudent" name="includesStudent" type="checkbox" role="switch" aria-checked="${form.includesStudent ? "true" : "false"}" aria-controls="consent-fields" aria-expanded="${form.includesStudent ? "true" : "false"}"${form.includesStudent ? " checked" : ""}>
-          This note shows a child's photo or name
+          This note shows a person's photo or name (child, teacher or staff)
         </label>
-        <span class="help">Turn on if any child can be recognised or is named. You will then confirm permission.</span>
+        <span class="help">Turn on if anyone (a child, teacher or staff member) can be recognised or is named. You will then confirm permission.</span>
         <div id="consent-fields"${form.includesStudent ? "" : " hidden"}>
           <label class="check"><input id="photoConsent" name="photoConsent" type="checkbox"${form.photoConsent ? " checked" : ""}> Photo is allowed</label>
-          <span class="help">Tick if a parent has agreed, or if no child’s face can be recognised.</span>
+          <span class="help">Tick if everyone who can be recognised has agreed (for a child, a parent), or if no face can be recognised.</span>
           <label class="check"><input id="nameConsent" name="nameConsent" type="checkbox"${form.nameConsent ? " checked" : ""}> Names are allowed</label>
-          <span class="help">Tick if no child is named, or if a named child’s parent has agreed. If they have not, write “a child in Grade 3”.</span>
+          <span class="help">Tick if no one is named, or if everyone named has agreed (for a child, a parent). If not, write “a child in Grade 3” or “a teacher”.</span>
         </div>
         <div class="publish-bar">
           <div class="actions">

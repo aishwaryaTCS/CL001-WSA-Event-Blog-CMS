@@ -46,7 +46,7 @@ function helpBody(): string {
         <li><strong>Publish</strong> puts the note on the website. If something is missing, the line under the button says what.</li>
         <li><strong>Calendar date</strong> decides the order. A future date keeps the note hidden until that day.</li>
         <li><strong>This week's note</strong> is the large block at the top of /blog. Only one note can be it; choosing a new one replaces the old.</li>
-        <li><strong>Child's photo or name:</strong> if any child can be recognised or is named, turn the switch on and tick both permissions before publishing.</li>
+        <li><strong>A person's photo or name:</strong> if anyone (a child, teacher or staff member) can be recognised or is named, turn the switch on and tick both permissions before publishing.</li>
         <li><strong>The URL</strong> is fixed after the first publish, so shared links keep working.</li>
         <li><strong>The Blogs page</strong> shows this week's note first, then <strong>Published notes</strong> and <strong>Drafts</strong> separately. Each shows 6 notes; press <strong>Show more</strong> for the next 6. Searching looks through all notes.</li>
       </ul>
@@ -85,6 +85,7 @@ function helpBody(): string {
         <li><strong>Theme of the year:</strong> change it under <strong>Site &amp; SEO → Calendar</strong>, or with <strong>Rename theme</strong> beside the theme on the calendar Dashboard. It is the large title on /theme-of-the-year.</li>
         <li><strong>Events:</strong> search the whole year, or narrow the list with <strong>Year</strong>, <strong>Strand</strong> and <strong>State</strong>. Choosing another year in the <strong>Year</strong> dropdown switches the whole calendar section to that year; the year you are editing shows at the top right.</li>
         <li><strong>Preview</strong> of an event shows its photos side by side; scroll sideways or use the arrows to see them all. Photos show only once the recap is published.</li>
+        <li><strong>Hide recap</strong> takes the recap off the website and keeps its text and photos to show again later. <strong>Delete recap</strong> removes the recap text and all its photos for good; the event itself stays published and unchanged.</li>
         <li><strong>Strands:</strong> add a new option in the card at the top; a colour is required. The list shows 6 options at a time; press <strong>Show more</strong> for the rest. An option in use cannot be deleted; untick <strong>Shown</strong> to hide it from the website.</li>
         <li><strong>All-year rhythm:</strong> 4 cards show at first; press <strong>Show more</strong> for the rest. Only one card opens for editing at a time; opening another closes the first without saving it, so press <strong>Save card</strong> first.</li>
         <li><strong>Years:</strong> only one “Change months” or “Delete” panel is open at a time.</li>
@@ -97,10 +98,9 @@ function helpBody(): string {
         <summary><span>Forgot your password?</span><svg class="help-chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></summary>
         <div class="help-body">
       <ul>
-        <li>For safety, the CMS cannot email a reset link. Ask the person who looks after the website server; it takes them a minute.</li>
-        <li>They sign in to the server, go to the CMS folder and run <code>npm run reset-password</code>. It asks for your email and a new password (at least 12 characters), typed twice.</li>
-        <li>Then sign in at <strong>/admin</strong> with the new password. Anyone still signed in to that account is signed out.</li>
-        <li>If the sign-in page says to wait 15 minutes after wrong tries, they can restart the CMS to clear it, or you can wait.</li>
+        <li>For safety, the CMS has no "email me a reset link" option. Contact the person who manages the website for the school; only they can set a new password for you.</li>
+        <li>They will give you a new password. Sign in with it, then change it to one only you know under <strong>Password</strong> in the menu.</li>
+        <li>Too many wrong tries lock sign-in for 15 minutes. Wait, then try again.</li>
         <li>If you <strong>do</strong> know your password and just want a new one, use <strong>Password</strong> in the menu instead.</li>
       </ul>
         </div>

@@ -519,7 +519,9 @@ export function editorValuesFromRow(row: EventRow): EventInput {
     body: row.body,
     highlights: row.highlights,
     recap: row.recap,
+    includesPeople: row.includes_people,
     photoConsent: row.photo_consent,
+    nameConsent: row.name_consent,
     showMoved: row.moved_from !== null,
     seoTitle: row.seo_title,
     seoDescription: row.seo_description,
@@ -546,7 +548,9 @@ export function blankValues(startDate: string): EventInput {
     body: "",
     highlights: [],
     recap: "",
+    includesPeople: true,
     photoConsent: false,
+    nameConsent: false,
     showMoved: false,
     seoTitle: "",
     seoDescription: "",
@@ -685,7 +689,7 @@ export function editorBody(model: EditorModel): string {
             <input id="alt-${esc(photo.id)}" class="photo-alt" type="text" maxlength="160" value="${esc(photo.alt)}"></div>
           <div class="field"><label for="cap-${esc(photo.id)}">Caption <span class="muted">(optional)</span></label>
             <input id="cap-${esc(photo.id)}" class="photo-caption" type="text" maxlength="120" value="${esc(photo.caption)}">
-            <span class="help">Don't write children's full names.</span></div>
+            <span class="help">Don't write anyone's full name without their permission.</span></div>
           <p class="photo-status help" role="status"></p>
         </div>
         <div class="photo-tools">
@@ -719,15 +723,27 @@ export function editorBody(model: EditorModel): string {
         <textarea id="recap" class="short" name="recap" maxlength="600" rows="4">${esc(values.recap)}</textarea>
         ${counter("recap", 600, 600)}
       </div>
-      <label class="check"><input type="checkbox" id="photoConsent" name="photoConsent"${values.photoConsent ? " checked" : ""}> Every child shown has photo consent on file with the school.</label>
-      <span class="help">Adding a photo clears this tick, so each new photo is checked.</span>
+      <label class="check switch"><input type="checkbox" id="includesPeople" name="includesPeople" role="switch" aria-controls="consent-fields" aria-checked="${values.includesPeople ? "true" : "false"}" aria-expanded="${values.includesPeople ? "true" : "false"}"${values.includesPeople ? " checked" : ""}> The photos or recap show a person's photo or name (child, teacher or staff)</label>
+      <span class="help">Turn off only if no one can be recognised and no one is named. Then no consent tick is needed.</span>
+      <div id="consent-fields"${values.includesPeople ? "" : " hidden"}>
+        <label class="check"><input type="checkbox" id="photoConsent" name="photoConsent"${values.photoConsent ? " checked" : ""}> Photo is allowed</label>
+        <span class="help">Everyone shown has photo consent on file with the school (for a child, from a parent).</span>
+        <label class="check"><input type="checkbox" id="nameConsent" name="nameConsent"${values.nameConsent ? " checked" : ""}> Names are allowed</label>
+        <span class="help">Tick if no one is named, or if everyone named has agreed (for a child, a parent).</span>
+      </div>
+      <span class="help">Adding a photo hides the recap and clears the ticks. Check the new photo and this switch again before publishing the recap.</span>
       ${
         event
           ? `<div class="bar-actions mt">${
               event.recap_published
                 ? `<button class="secondary" type="submit" name="intent" value="recap-unpublish">Hide recap</button><span class="state completed">Recap is on the site</span>`
                 : `<button class="primary" type="submit" name="intent" value="recap-publish"${canRecap ? "" : " disabled"}>Publish recap</button>${canRecap ? "" : `<span class="help">${status !== "published" ? esc(CAL_COPY.recapNotPublished) : esc(CAL_COPY.recapEarly)}</span>`}`
-            }</div>`
+            }${
+              event.recap || photos.length
+                ? `<button class="secondary danger" type="submit" form="recap-delete-form" data-confirm="Delete this recap? Its text and all its photos are removed for good. The event itself stays as it is.">Delete recap</button>`
+                : ""
+            }</div>
+          <span class="help">Hide recap takes it off the site and keeps it. Delete recap removes the recap text and photos for good; the event stays.</span>`
           : ""
       }
     </div>
@@ -827,7 +843,8 @@ export function editorBody(model: EditorModel): string {
         <p id="missing-line" class="warn" role="status"></p>
       </div>
     </form>
-    ${event && status === "draft" ? `<form id="delete-form" method="post" action="/admin/calendar/events/${esc(id)}/delete" hidden></form>` : ""}`;
+    ${event && status === "draft" ? `<form id="delete-form" method="post" action="/admin/calendar/events/${esc(id)}/delete" hidden></form>` : ""}
+    ${event ? `<form id="recap-delete-form" method="post" action="/admin/calendar/events/${esc(id)}/recap/delete" hidden></form>` : ""}`;
 }
 
 function lastDay(monthStart: string): string {
@@ -858,6 +875,17 @@ export const EDITOR_SCRIPT = `
   var dirty = false;
   // Choosing photos is not an edit to the form (they upload on their own).
   form.addEventListener("input", function (event) { if (event.target && event.target.type === "file") return; dirty = true; });
+
+  // Consent ticks show only when a person's photo or name is shown.
+  var includesPeople = document.getElementById("includesPeople");
+  var consentFields = document.getElementById("consent-fields");
+  if (includesPeople && consentFields) {
+    includesPeople.addEventListener("change", function () {
+      consentFields.hidden = !includesPeople.checked;
+      includesPeople.setAttribute("aria-checked", includesPeople.checked ? "true" : "false");
+      includesPeople.setAttribute("aria-expanded", includesPeople.checked ? "true" : "false");
+    });
+  }
 
   // Tabs
   var tabs = Array.prototype.slice.call(document.querySelectorAll("[data-tab]")).filter(function (el) { return el.tagName === "BUTTON"; });
@@ -944,7 +972,7 @@ export const EDITOR_SCRIPT = `
   form.addEventListener("submit", function (event) {
     var submitter = event.submitter;
     var intent = submitter ? submitter.value : "save";
-    if (submitter && submitter.getAttribute("form") === "delete-form") return;
+    if (submitter && (submitter.getAttribute("form") === "delete-form" || submitter.getAttribute("form") === "recap-delete-form")) return;
     var missing = [];
     if (!title.value.trim()) missing.push("a title");
     if (!start.value) missing.push("a start date");
