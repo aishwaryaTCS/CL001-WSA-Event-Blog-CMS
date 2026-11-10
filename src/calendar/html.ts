@@ -1685,7 +1685,7 @@ export const YEARS_SCRIPT = `
   });
   // One year panel open at a time: opening "Change months" or "Delete" on a card closes any other.
   function closeOthers(keep) {
-    Array.prototype.forEach.call(document.querySelectorAll('[id^="ye-"]:not([hidden]), [id^="yd-"]:not([hidden])'), function (panel) {
+    Array.prototype.forEach.call(document.querySelectorAll('form[id^="ye-"]:not([hidden]), form[id^="yd-"]:not([hidden])'), function (panel) {
       if (panel === keep) return;
       panel.hidden = true;
       var id = panel.id.slice(3);
